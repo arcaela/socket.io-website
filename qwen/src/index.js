@@ -29,6 +29,7 @@ const { createChat, streamChatCompletion } = require('./lib/http');
 const { flattenMessages } = require('./lib/messages');
 const { makeConversation } = require('./lib/conversation');
 const { makeHelpers } = require('./lib/helpers');
+const errors = require('./lib/errors');
 
 // 2) Lazy jsdom env — built at most once per process. We expose this via a
 //    closure so session.js can request it only when it actually needs to
@@ -107,9 +108,8 @@ async function qwen(messages, options = {}) {
     // is tracked per-device by Qwen, so it resets the guest quota.
     const rotate =
       retryOnAuthFail && (
-        e.status === 401 ||
-        /Unauthorized/i.test(e.message) ||
-        e.code === 'RateLimited'
+        e instanceof errors.QwenRateLimitedError ||
+        e instanceof errors.QwenUnauthorizedError
       );
     if (rotate) {
       ensureJsdomEnv();
@@ -119,7 +119,10 @@ async function qwen(messages, options = {}) {
   }
 }
 
-// 6) Streaming variant — returns an async iterator directly.
+// Legacy OpenAI-style streaming. Kept for compatibility with callers that
+// speak OpenAI's chat-completions shape. For the intent-specific typed
+// streams, use `qwen.ask.stream`, `qwen.search.stream`, `qwen.image.stream`,
+// `qwen.think.stream` (or the chat versions) instead.
 qwen.stream = async function* (messages, options = {}) {
   const {
     model = DEFAULT_MODEL,
@@ -164,6 +167,22 @@ qwen.search = helpers.search;
 qwen.image = helpers.image;
 qwen.think = helpers.think;
 qwen.chat = helpers.chat;
+
+// -------- Error classes --------
+//
+// Callers can use `instanceof` or check `.code`:
+//   try { await qwen.ask('...') }
+//   catch (e) {
+//     if (e instanceof qwen.errors.QwenRateLimitedError) { ... }
+//     if (e.code === 'RateLimited') { ... }
+//   }
+qwen.errors = errors;
+qwen.QwenError = errors.QwenError;
+qwen.QwenRateLimitedError = errors.QwenRateLimitedError;
+qwen.QwenUnauthorizedError = errors.QwenUnauthorizedError;
+qwen.QwenBadRequestError = errors.QwenBadRequestError;
+qwen.QwenServerError = errors.QwenServerError;
+qwen.QwenNetworkError = errors.QwenNetworkError;
 
 // -------- Lower-level API (still exposed) --------
 qwen.conversation = conversation;

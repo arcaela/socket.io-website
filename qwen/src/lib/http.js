@@ -14,6 +14,11 @@
 const crypto = require('node:crypto');
 const { BASE, API, SPA_VERSION, DEFAULT_MODEL } = require('./constants');
 const { parseSSEBlock } = require('./sse');
+const {
+  QwenError,
+  errorFromEnvelope,
+  wrapNetworkError,
+} = require('./errors');
 
 function baseHeaders(session, extra = {}) {
   return {
@@ -42,25 +47,35 @@ async function createChat(session, {
   chatMode = 'normal',
   chatType = 't2t',
 } = {}) {
-  const res = await fetch(`${API}/chats/new`, {
-    method: 'POST',
-    headers: baseHeaders(session),
-    body: JSON.stringify({
-      title: 'New Chat',
-      models: [model],
-      chat_mode: chatMode,
-      chat_type: chatType,
-      // NOTE: chats/new uses milliseconds; chat/completions uses seconds.
-      // Yes, it's inconsistent on Qwen's side. Don't try to unify it.
-      timestamp: Date.now(),
-    }),
-  });
-  const json = await res.json().catch(() => null);
+  let res;
+  try {
+    res = await fetch(`${API}/chats/new`, {
+      method: 'POST',
+      headers: baseHeaders(session),
+      body: JSON.stringify({
+        title: 'New Chat',
+        models: [model],
+        chat_mode: chatMode,
+        chat_type: chatType,
+        // NOTE: chats/new uses milliseconds; chat/completions uses seconds.
+        // Yes, it's inconsistent on Qwen's side. Don't try to unify it.
+        timestamp: Date.now(),
+      }),
+    });
+  } catch (e) {
+    throw wrapNetworkError(e, 'createChat: fetch failed');
+  }
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (_) {}
+  if (json && json.success === false) {
+    throw errorFromEnvelope(json, text);
+  }
   if (!res.ok || !json || json.success !== true) {
-    const err = new Error(`createChat failed HTTP ${res.status}: ${JSON.stringify(json)}`);
-    err.status = res.status;
-    err.response = json;
-    throw err;
+    throw new QwenError(`createChat failed HTTP ${res.status}: ${text.slice(0, 300)}`, {
+      status: res.status,
+      response: json || text,
+    });
   }
   return json.data.id;
 }
@@ -107,39 +122,39 @@ async function* streamChatCompletion(session, chatId, prompt, {
     timestamp: Math.floor(Date.now() / 1000),
   };
 
-  const res = await fetch(
-    `${API}/chat/completions?chat_id=${encodeURIComponent(chatId)}`,
-    {
-      method: 'POST',
-      headers: baseHeaders(session, {
-        Accept: 'text/event-stream',
-        'X-Accel-Buffering': 'no',
-      }),
-      body: JSON.stringify(body),
-    }
-  );
+  let res;
+  try {
+    res = await fetch(
+      `${API}/chat/completions?chat_id=${encodeURIComponent(chatId)}`,
+      {
+        method: 'POST',
+        headers: baseHeaders(session, {
+          Accept: 'text/event-stream',
+          'X-Accel-Buffering': 'no',
+        }),
+        body: JSON.stringify(body),
+      }
+    );
+  } catch (e) {
+    throw wrapNetworkError(e, 'streamChatCompletion: fetch failed');
+  }
 
   if (!res.ok) {
     const t = await res.text().catch(() => '');
-    const err = new Error(`chat/completions HTTP ${res.status}: ${t.slice(0, 300)}`);
-    err.status = res.status;
-    throw err;
+    throw new QwenError(`chat/completions HTTP ${res.status}: ${t.slice(0, 300)}`, {
+      status: res.status,
+      response: t,
+    });
   }
 
   // Error responses come back as 200 OK with application/json — NOT as SSE.
+  // Parse the envelope and dispatch to the appropriate QwenError subclass.
   const ct = res.headers.get('content-type') || '';
   if (!ct.includes('text/event-stream')) {
     const text = await res.text().catch(() => '');
     let parsed = null;
     try { parsed = JSON.parse(text); } catch (_) {}
-    const code = parsed && parsed.data && parsed.data.code;
-    const details = (parsed && parsed.data && (parsed.data.details || parsed.data.template))
-      || text.slice(0, 300);
-    const err = new Error(`streamChatCompletion non-SSE (${code || 'unknown'}): ${details}`);
-    err.code = code;
-    err.retryAfterHours = (parsed && parsed.data && parsed.data.num) || null;
-    err.response = parsed || text;
-    throw err;
+    throw errorFromEnvelope(parsed, text);
   }
 
   const reader = res.body.getReader();

@@ -1,78 +1,81 @@
 // src/lib/helpers.js
-// The user-facing API. `chat()` is the primitive — every other helper is a
-// thin wrapper that creates a throwaway `chat()` and calls one of its turn
-// methods. This means credentials + session handling live in exactly one
-// place and the top-level shortcuts can't drift from the stateful ones.
+// The practical API. Every method is exposed in two forms:
 //
-// Primary:
-//   chat(opts?)                  → stateful multi-turn handle
-//                                  { chatId, model, turn, history, lastResponseId,
-//                                    ask, search, image, think }
+//   method(input, opts?)         → Promise<result>         (collected)
+//   method.stream(input, opts?)  → AsyncIterable<Event>    (streaming)
 //
-// One-shot wrappers (each creates a fresh chat and invokes the same method):
-//   ask(prompt, opts?)           → string                — via chat(opts).ask(prompt)
-//   search(query, opts?)         → { reply, sources, usage }   — via chat(opts).search(query)
-//   image(prompt, opts?)         → { url, width, height, model } — via chat(opts).image(prompt)
-//   think(prompt, opts?)         → { reply, thinking, usage }   — via chat(opts).think(prompt)
+// Both forms go through `qwen.conversation()` under the hood — specifically
+// `conv.send()` for the collected form and `conv.stream()` for the iterator
+// form. There's no duplicated parsing or session logic.
 //
-// The relationship is: the four top-level methods share the exact same
-// implementation that the four chat methods use. There's no duplicated
-// parsing / extraction / credential code.
+// `qwen.chat()` is the primitive. The four top-level one-shot helpers
+// (ask, search, image, think) are one-line wrappers that create a throwaway
+// chat and invoke the matching method on it.
 'use strict';
 
 const { DEFAULT_MODEL } = require('./constants');
 
-// ---- shape extractors ----
+// -------- low-level: pump an iterator and collect typed events --------
 //
-// Used by both chat methods and one-shot helpers to hide Qwen's raw
-// delta/tool_result plumbing behind clean result objects.
-
-// Pulls deduped { url, title, snippet, date, hostname } records out of every
-// web_search tool_result event captured during the turn.
-function extractSources(sendResult) {
-  const sources = [];
-  if (!sendResult || !sendResult.toolEvents) return sources;
-  for (const ev of sendResult.toolEvents) {
-    const docs = ev.extra && ev.extra.tool_result && ev.extra.tool_result.docs;
-    if (!docs || !Array.isArray(docs)) continue;
-    for (const doc of docs) {
-      if (!doc || !doc.url) continue;
-      if (sources.some((s) => s.url === doc.url)) continue;
-      sources.push({
-        url: doc.url,
-        title: doc.title || null,
-        snippet: doc.snippet || null,
-        date: doc.date || null,
-        hostname: doc.hostname || null,
-      });
-    }
+// These helpers walk a `conv.stream()` generator and pull out the final
+// done event, which carries the aggregated result.
+async function _consumeDone(stream) {
+  let done = null;
+  for await (const ev of stream) {
+    if (ev.type === 'done') done = ev;
   }
-  return sources;
+  if (!done) throw new Error('stream ended without done event');
+  return done;
 }
 
-// For t2i: Qwen returns the CDN URL as the plain text content of the
-// image_gen phase delta, and the dimensions in the `usage` object.
-function extractImage(sendResult, model) {
-  const url = (sendResult && sendResult.reply ? sendResult.reply : '').trim();
-  const usage = (sendResult && sendResult.usage) || {};
+// -------- shape extractors for top-level return values --------
+
+function _toAskResult(done) {
   return {
-    url,
-    width: usage.width || null,
-    height: usage.height || null,
-    model: model || null,
+    reply: done.reply,
+    turn: done.turn,
+    usage: done.usage,
+    thinking: done.thinking || null,
   };
 }
 
-// ---- factory ----
-//
-// Receives a reference to the lower-level `conversation(opts)` via DI so
-// this module has no import cycle with src/index.js.
+function _toSearchResult(done) {
+  return {
+    reply: done.reply,
+    sources: done.sources || [],
+    turn: done.turn,
+    usage: done.usage,
+  };
+}
+
+function _toImageResult(done, model) {
+  const img = done.image || {};
+  return {
+    url: img.url || (done.reply || '').trim(),
+    width: img.width || null,
+    height: img.height || null,
+    model: model || null,
+    turn: done.turn,
+  };
+}
+
+function _toThinkResult(done) {
+  return {
+    reply: done.reply,
+    thinking: done.thinking || null,
+    turn: done.turn,
+    usage: done.usage,
+  };
+}
+
+// -------- factory --------
+
 function makeHelpers({ conversation }) {
 
-  // --- PRIMITIVE: chat() ---
+  // === PRIMITIVE: chat() ===
   //
-  // A stateful multi-turn conversation. All four one-shot helpers below
-  // delegate to this.
+  // Returns a stateful handle with four turn methods, each with a .stream
+  // property that exposes the same underlying conv.stream() iterator.
   async function chat(opts = {}) {
     const {
       model = DEFAULT_MODEL,
@@ -84,94 +87,107 @@ function makeHelpers({ conversation }) {
 
     const conv = await conversation({ model, system, chatType, chatMode, thinking });
 
-    const handle = {
-      // Identity
+    // -- chat.ask --------------------------------------------------------
+    async function ask(message, sendOpts = {}) {
+      const done = await _consumeDone(conv.stream(message, sendOpts));
+      return _toAskResult(done);
+    }
+    ask.stream = function askStream(message, sendOpts = {}) {
+      return conv.stream(message, sendOpts);
+    };
+
+    // -- chat.search -----------------------------------------------------
+    async function search(query, sendOpts = {}) {
+      const done = await _consumeDone(conv.stream(
+        query, Object.assign({}, sendOpts, { chatType: 'search' })
+      ));
+      return _toSearchResult(done);
+    }
+    search.stream = function searchStream(query, sendOpts = {}) {
+      return conv.stream(query, Object.assign({}, sendOpts, { chatType: 'search' }));
+    };
+
+    // -- chat.image ------------------------------------------------------
+    async function image(prompt, sendOpts = {}) {
+      const done = await _consumeDone(conv.stream(
+        prompt, Object.assign({}, sendOpts, { chatType: 't2i' })
+      ));
+      return _toImageResult(done, conv.model);
+    }
+    image.stream = function imageStream(prompt, sendOpts = {}) {
+      return conv.stream(prompt, Object.assign({}, sendOpts, { chatType: 't2i' }));
+    };
+
+    // -- chat.think ------------------------------------------------------
+    async function think(message, sendOpts = {}) {
+      const done = await _consumeDone(conv.stream(
+        message, Object.assign({}, sendOpts, { thinking: true })
+      ));
+      return _toThinkResult(done);
+    }
+    think.stream = function thinkStream(message, sendOpts = {}) {
+      return conv.stream(message, Object.assign({}, sendOpts, { thinking: true }));
+    };
+
+    return {
       chatId: conv.chatId,
       model: conv.model,
-
-      // Live state
       get turn() { return conv.turn; },
       get history() { return conv.history; },
       get lastResponseId() { return conv.lastResponseId; },
-
-      // === Turn methods ===
-
-      // Plain text turn. Uses the chat's default chatType (normally 't2t').
-      async ask(message, sendOpts = {}) {
-        const r = await conv.send(message, sendOpts);
-        return {
-          reply: r.reply,
-          turn: r.turn,
-          usage: r.usage,
-          thinking: r.thinking || null,
-        };
-      },
-
-      // Web search turn. Forces chatType='search' on this turn only so the
-      // model invokes the built-in web_search tool. Returns the structured
-      // sources list alongside the text reply.
-      async search(query, sendOpts = {}) {
-        const r = await conv.send(query, Object.assign({}, sendOpts, { chatType: 'search' }));
-        return {
-          reply: r.reply,
-          sources: extractSources(r),
-          turn: r.turn,
-          usage: r.usage,
-        };
-      },
-
-      // Image generation turn. Forces chatType='t2i' and returns the signed
-      // CDN URL along with its dimensions.
-      async image(prompt, sendOpts = {}) {
-        const r = await conv.send(prompt, Object.assign({}, sendOpts, { chatType: 't2i' }));
-        return extractImage(r, conv.model);
-      },
-
-      // Thinking turn. Forces thinking_enabled=true on this turn so the
-      // model emits its chain-of-thought in a separate phase. Returns both
-      // the thinking text and the final answer.
-      async think(message, sendOpts = {}) {
-        const r = await conv.send(message, Object.assign({}, sendOpts, { thinking: true }));
-        return {
-          reply: r.reply,
-          thinking: r.thinking,
-          turn: r.turn,
-          usage: r.usage,
-        };
-      },
+      ask,
+      search,
+      image,
+      think,
     };
-
-    return handle;
   }
 
-  // --- ONE-SHOT WRAPPERS ---
+  // === ONE-SHOT WRAPPERS ===
   //
-  // Each of these is literally `create a throwaway chat and call the
-  // matching method on it`. No duplicated logic — the chat IS the primitive.
+  // Each creates a throwaway chat and calls the matching method on it.
+  // The .stream variant mirrors the same code path over the streaming form.
 
-  // Returns a bare string (not an object) for ergonomic one-line use.
   async function ask(prompt, opts = {}) {
     const ch = await chat(opts);
-    const { reply } = await ch.ask(prompt, { onDelta: opts.onDelta });
+    const { reply } = await ch.ask(prompt);
     return reply;
   }
+  ask.stream = async function* askStream(prompt, opts = {}) {
+    const ch = await chat(opts);
+    yield* ch.ask.stream(prompt);
+  };
 
   async function search(query, opts = {}) {
     const ch = await chat(opts);
-    return ch.search(query, { onDelta: opts.onDelta });
+    const r = await ch.search(query);
+    return { reply: r.reply, sources: r.sources, usage: r.usage };
   }
+  search.stream = async function* searchStream(query, opts = {}) {
+    const ch = await chat(opts);
+    yield* ch.search.stream(query);
+  };
 
   async function image(prompt, opts = {}) {
     const ch = await chat(opts);
-    return ch.image(prompt);
+    const r = await ch.image(prompt);
+    return { url: r.url, width: r.width, height: r.height, model: r.model };
   }
+  image.stream = async function* imageStream(prompt, opts = {}) {
+    const ch = await chat(opts);
+    yield* ch.image.stream(prompt);
+  };
 
   async function think(prompt, opts = {}) {
     const ch = await chat(opts);
-    return ch.think(prompt, { onDelta: opts.onDelta });
+    const r = await ch.think(prompt);
+    return { reply: r.reply, thinking: r.thinking, usage: r.usage };
   }
+  think.stream = async function* thinkStream(prompt, opts = {}) {
+    const ch = await chat(opts);
+    yield* ch.think.stream(prompt);
+  };
 
   return { chat, ask, search, image, think };
 }
 
-module.exports = { makeHelpers, extractSources, extractImage };
+module.exports = { makeHelpers };

@@ -1,21 +1,48 @@
 // src/lib/conversation.js
-// Stateful multi-turn conversation handle. Wraps a single chat_id and
-// chains parent_id across turns so the backend tracks history server-side.
+// Stateful multi-turn conversation handle. Wraps a single `chat_id` and
+// chains `parent_id` across turns so Qwen's backend tracks history
+// server-side.
 //
-//   const conv = await qwen.conversation({ system: '...', chatType: 'search' });
-//   const { reply } = await conv.send('Hello');
-//   const { reply } = await conv.send('and now in French');
-//   console.log(conv.turn, conv.history);
+// Exposes TWO forms per turn:
 //
-// Each `send` returns an object with reply/thinking/usage/toolEvents/turn.
-// `toolEvents` is a list of raw tool-call records captured during the turn,
-// useful for harvesting web_search citations or image-gen URLs without
-// re-parsing the delta stream.
+//   conv.send(message, opts?)       → Promise<result>
+//       Collects the entire response and returns an object with everything
+//       the caller needs: reply, thinking, sources, usage, etc.
+//
+//   conv.stream(message, opts?)     → AsyncIterable<TypedEvent>
+//       Yields discrete, discriminated-union events as the server streams.
+//       Always ends with a { type: 'done', ... } event carrying the same
+//       aggregated data that .send() would have returned. Errors throw
+//       during iteration — never arrive as chunks.
+//
+// Both forms go through the same underlying _sendStream() generator so
+// they share the same state mutation (lastResponseId, turn counter, history).
 'use strict';
 
 const { API, DEFAULT_MODEL } = require('./constants');
-const { baseHeaders, createChat } = require('./http');
-const { parseSSEBlock } = require('./sse');
+const { baseHeaders, streamChatCompletion } = require('./http');
+const { QwenError } = require('./errors');
+
+// -------- source extractor (shared with helpers) --------
+
+// Pulls { url, title, snippet, date, hostname } records out of a tool
+// event that carries a web_search tool_result. Deduped by URL.
+function extractSourcesFromToolEvent(ev) {
+  const out = [];
+  const docs = ev && ev.extra && ev.extra.tool_result && ev.extra.tool_result.docs;
+  if (!docs || !Array.isArray(docs)) return out;
+  for (const doc of docs) {
+    if (!doc || !doc.url) continue;
+    out.push({
+      url: doc.url,
+      title: doc.title || null,
+      snippet: doc.snippet || null,
+      date: doc.date || null,
+      hostname: doc.hostname || null,
+    });
+  }
+  return out;
+}
 
 function makeConversation({ getSession }) {
   return async function conversation(opts = {}) {
@@ -28,6 +55,7 @@ function makeConversation({ getSession }) {
     } = opts;
 
     const session = await getSession();
+    const { createChat } = require('./http');
     const chatId = await createChat(session, { model, chatMode, chatType });
 
     // Mutable per-conversation state
@@ -35,135 +63,133 @@ function makeConversation({ getSession }) {
     let turnCount = 0;
     const history = [];
 
-    async function send(message, sendOpts = {}) {
+    // The canonical send path. Returns an async generator that emits
+    // typed events and, as its FINAL event, a `done` with the aggregated
+    // result. All state mutation (turn++, history.push, lastResponseId)
+    // happens right before the done event is emitted.
+    async function* _sendStream(message, sendOpts = {}) {
       const useChatType = sendOpts.chatType || chatType;
       const useChatMode = sendOpts.chatMode || chatMode;
       const useThinking = sendOpts.thinking != null ? sendOpts.thinking : thinking;
-      const onDelta = sendOpts.onDelta || null;
 
-      // Inject the system prompt ONLY on the first turn — the backend
-      // remembers the whole thread under chat_id so repeating it wastes
-      // tokens.
+      // System prompt is injected ONLY on the first turn — the backend
+      // remembers it afterwards via chat_id, so repeating wastes tokens.
       let prompt = message;
       if (system && turnCount === 0) {
         prompt = `[Instrucciones del sistema]\n${system}\n\n[Mensaje del usuario]\n${message}`;
       }
 
-      const body = {
-        stream: true,
-        version: '2.1',
-        incremental_output: true,
-        chat_id: chatId,
-        chat_mode: useChatMode,
-        model,
-        parent_id: lastResponseId,
-        messages: [
-          {
-            role: 'user',
-            content: prompt,
-            chat_type: useChatType,
-            feature_config: {
-              thinking_enabled: useThinking,
-              output_schema: 'phase',
-            },
-            extra: {},
-            sub_chat_type: useChatType,
-          },
-        ],
-        timestamp: Math.floor(Date.now() / 1000),
-      };
-
-      const res = await fetch(
-        `${API}/chat/completions?chat_id=${encodeURIComponent(chatId)}`,
-        {
-          method: 'POST',
-          headers: baseHeaders(session, {
-            Accept: 'text/event-stream',
-            'X-Accel-Buffering': 'no',
-          }),
-          body: JSON.stringify(body),
-        }
-      );
-
-      if (!res.ok) {
-        const t = await res.text().catch(() => '');
-        const err = new Error(`conversation.send HTTP ${res.status}: ${t.slice(0, 400)}`);
-        err.status = res.status;
-        throw err;
-      }
-
-      // Rate-limit / Unauthorized / Bad_Request arrive as HTTP 200 + JSON.
-      const ct = res.headers.get('content-type') || '';
-      if (!ct.includes('text/event-stream')) {
-        const text = await res.text().catch(() => '');
-        let parsed = null;
-        try { parsed = JSON.parse(text); } catch (_) {}
-        const code = parsed && parsed.data && parsed.data.code;
-        const details = (parsed && parsed.data && (parsed.data.details || parsed.data.template))
-          || text.slice(0, 300);
-        const err = new Error(`conversation.send non-SSE (${code || 'unknown'}): ${details}`);
-        err.code = code;
-        err.retryAfterHours = (parsed && parsed.data && parsed.data.num) || null;
-        err.response = parsed || text;
-        throw err;
-      }
-
-      // Parse the SSE stream and accumulate the answer / thinking text.
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder('utf-8');
-      let buffer = '';
+      // Accumulators — these fill up as the lower-level iterator yields.
       let answerText = '';
       let thinkingText = '';
       let usage = null;
-      let currentResponseId = null;
+      let responseId = null;
+      const sources = [];
       const toolEvents = [];
+      let imageMeta = null;
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        while (true) {
-          const sep = buffer.indexOf('\n\n');
-          if (sep === -1) break;
-          const block = buffer.slice(0, sep);
-          buffer = buffer.slice(sep + 2);
-          const payload = parseSSEBlock(block);
-          if (!payload) continue;
-          if (payload['response.created']) {
-            currentResponseId = payload['response.created'].response_id;
+      for await (const ev of streamChatCompletion(session, chatId, prompt, {
+        model,
+        chatMode: useChatMode,
+        chatType: useChatType,
+        parentId: lastResponseId,
+        thinkingEnabled: useThinking,
+      })) {
+        if (ev.type === 'created') {
+          responseId = ev.responseId;
+          yield {
+            type: 'start',
+            chatId: ev.chatId,
+            responseId: ev.responseId,
+            parentId: ev.parentId,
+          };
+          continue;
+        }
+
+        if (ev.type === 'info') {
+          // keep_alive and similar side-channel metadata
+          yield { type: 'info', info: ev.info };
+          continue;
+        }
+
+        if (ev.type === 'tool') {
+          toolEvents.push(ev);
+
+          // A tool call arrives in two waves: first the function_call args
+          // stream in, then a tool_result arrives with the output.
+          if (ev.functionCall) {
+            yield {
+              type: 'tool_call',
+              name: ev.functionCall.name,
+              arguments: ev.functionCall.arguments || '',
+              phase: ev.phase,
+              functionId: ev.functionId,
+            };
+          }
+
+          const docs = ev.extra && ev.extra.tool_result && ev.extra.tool_result.docs;
+          if (docs && Array.isArray(docs)) {
+            const newSources = extractSourcesFromToolEvent(ev);
+            for (const s of newSources) {
+              if (!sources.some((x) => x.url === s.url)) sources.push(s);
+            }
+            yield { type: 'sources', sources: newSources };
+          }
+          continue;
+        }
+
+        if (ev.type === 'delta') {
+          if (ev.usage) usage = ev.usage;
+
+          if (ev.phase === 'think') {
+            thinkingText += ev.content;
+            yield {
+              type: 'thinking',
+              content: ev.content,
+              fullThinking: thinkingText,
+            };
             continue;
           }
-          const choice = payload.choices && payload.choices[0];
-          if (!choice || !choice.delta) continue;
-          const delta = choice.delta;
-          if (payload.usage) usage = payload.usage;
 
-          // Record tool-related events FIRST (some of them arrive with
-          // `status: "finished"`, which would be skipped by the early
-          // continue below — notably the web_search tool_result event).
-          if (delta.function_call || (delta.extra && delta.extra.tool_result)) {
-            toolEvents.push({
-              phase: delta.phase,
-              functionCall: delta.function_call,
-              functionId: delta.function_id,
-              name: delta.name,
-              extra: delta.extra,
-            });
+          if (ev.phase === 'image_gen') {
+            // The `content` field IS the signed CDN URL. Dimensions come
+            // from the same delta's usage object (width/height/image_count).
+            imageMeta = {
+              url: (ev.content || '').trim(),
+              width: (ev.usage && ev.usage.width) || null,
+              height: (ev.usage && ev.usage.height) || null,
+            };
+            yield {
+              type: 'image',
+              url: imageMeta.url,
+              width: imageMeta.width,
+              height: imageMeta.height,
+              extra: ev.extra || null,
+            };
+            continue;
           }
 
-          // The terminal `phase: "answer", status: "finished"` event never
-          // carries content — skip it so we don't re-emit empty deltas.
-          if (delta.status === 'finished') continue;
+          // Default: phase === 'answer' or similar text phase
+          answerText += ev.content;
+          yield {
+            type: 'text',
+            content: ev.content,
+            fullContent: answerText,
+            phase: ev.phase,
+          };
+          continue;
+        }
 
-          if (typeof delta.content === 'string' && delta.content.length) {
-            if (delta.phase === 'think') thinkingText += delta.content;
-            else answerText += delta.content;
-            if (onDelta) onDelta(Object.assign({}, delta, { fullContent: answerText }));
-          }
+        if (ev.type === 'finished') {
+          // Don't yield anything here — the `done` event below carries the
+          // same information plus the collected result.
+          if (ev.responseId) responseId = ev.responseId;
+          continue;
         }
       }
 
-      if (currentResponseId) lastResponseId = currentResponseId;
+      // -- state mutation + done event --
+      if (responseId) lastResponseId = responseId;
       turnCount += 1;
       history.push({ role: 'user', content: message });
       history.push({
@@ -172,15 +198,37 @@ function makeConversation({ getSession }) {
         thinking: thinkingText || undefined,
       });
 
-      return {
+      yield {
+        type: 'done',
         reply: answerText,
         thinking: thinkingText || null,
-        responseId: currentResponseId,
+        sources: sources.length ? sources : null,
+        image: imageMeta,
+        responseId,
         parentId: lastResponseId,
         turn: turnCount,
         usage,
         toolEvents,
       };
+    }
+
+    // Public iterator form. Note: consumers who want the collected result
+    // should either use .send() or look for the final `done` event.
+    function stream(message, sendOpts = {}) {
+      return _sendStream(message, sendOpts);
+    }
+
+    // Public collected form. Runs the iterator to completion and returns
+    // the payload of the terminal `done` event.
+    async function send(message, sendOpts = {}) {
+      let done = null;
+      for await (const ev of _sendStream(message, sendOpts)) {
+        if (ev.type === 'done') done = ev;
+      }
+      if (!done) {
+        throw new QwenError('conversation.send: stream ended without a done event');
+      }
+      return done;
     }
 
     return {
@@ -192,8 +240,9 @@ function makeConversation({ getSession }) {
       get history() { return history.slice(); },
       get lastResponseId() { return lastResponseId; },
       send,
+      stream,
     };
   };
 }
 
-module.exports = { makeConversation };
+module.exports = { makeConversation, extractSourcesFromToolEvent };

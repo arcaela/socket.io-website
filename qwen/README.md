@@ -5,28 +5,33 @@ A **browser-free, self-contained Qwen (chat.qwen.ai) guest client** for Node.js 
 ```js
 const qwen = require('./src');
 
-// --- The primitive: a stateful chat handle ---
-//
-// Every request Qwen handles needs an authenticated session, and every
-// multi-turn conversation needs a stable chat_id. So `qwen.chat()` is the
-// real primitive: it creates a session-backed conversation with a persistent
-// chat_id and exposes four turn methods.
+// Every method has TWO forms: Promise (collected) and Stream (async iterator).
+// Both throw the SAME typed exceptions on failure — nothing goes through
+// stream chunks as an "error event".
+
+// ── Promise form ──
+const reply                  = await qwen.ask('¿Capital de Francia?');         // → string
+const { reply, sources }     = await qwen.search('precio bitcoin hoy');         // → { reply, sources, usage }
+const { url, width, height } = await qwen.image('un gato naranja');             // → { url, width, height, model }
+const { reply, thinking }    = await qwen.think('explica la relatividad');      // → { reply, thinking, usage }
+
+// ── Stream form ──
+for await (const ev of qwen.ask.stream('contá del 1 al 5')) {
+  if (ev.type === 'text') process.stdout.write(ev.content);
+  if (ev.type === 'done') console.log('\nusage:', ev.usage);
+}
+
+// ── Stateful chat: all four methods under one chat_id with shared memory ──
 const chat = await qwen.chat({ model: 'qwen3.6-plus', system: 'Sé conciso.' });
 
 await chat.ask('me llamo Ariel');
-const { reply }             = await chat.ask('¿cómo me llamo?');     // remembers
-const { reply, sources }    = await chat.search('clima en Madrid');  // this turn → web search
-const { url, width, height} = await chat.image('un paisaje');         // this turn → image gen
-const { reply, thinking }   = await chat.think('diseñá una SPA');     // this turn → thinking
+const { reply }              = await chat.ask('¿cómo me llamo?');               // remembers
+const { reply, sources }     = await chat.search('clima en Madrid');             // this turn → web search
+const { url, width, height } = await chat.image('un paisaje futurista');         // this turn → image gen
+const { reply, thinking }    = await chat.think('diseñá una SPA paso a paso');   // this turn → thinking
 
-// --- One-shot shortcuts ---
-//
-// Each of these just creates a throwaway `chat()` and calls the matching
-// method. Use them when you don't need memory — same code path underneath.
-const reply                  = await qwen.ask('¿Capital de Francia?');        // → string
-const { reply, sources }     = await qwen.search('precio bitcoin hoy');        // → { reply, sources, usage }
-const { url, width, height } = await qwen.image('un gato naranja');            // → { url, width, height, model }
-const { reply, thinking }    = await qwen.think('explica la relatividad');     // → { reply, thinking, usage }
+// Every chat method also has .stream
+for await (const ev of chat.ask.stream('resumí todo')) { /* ... */ }
 ```
 
 Full runnable examples live under [`examples/`](./examples/).
@@ -43,13 +48,13 @@ No private signatures, no custom crypto, no reverse-engineering of baxia's finge
 
 ## Practical API reference
 
-### API philosophy: chat is the primitive
+### Design principles
 
-Qwen's guest backend requires an authenticated session (cookies + `bx-ua` + `bx-umidtoken`) and tracks conversation history server-side via `chat_id` + `parent_id` chaining. Because both of those things only make sense in the context of a "chat", this library treats **`qwen.chat()` as its primary surface**:
+1. **`qwen.chat()` is the primitive.** Every top-level helper (`qwen.ask`, `qwen.search`, `qwen.image`, `qwen.think`) is a one-line wrapper that creates a throwaway `chat()` and invokes the matching method. The session / credentials / HTTP code lives in exactly one place.
 
-- `qwen.chat(opts?)` creates a real multi-turn conversation with a persistent `chat_id`, live `turn` count, and history.
-- The returned handle exposes four turn methods: `.ask()`, `.search()`, `.image()`, `.think()`.
-- The top-level functions `qwen.ask`, `qwen.search`, `qwen.image`, `qwen.think` are **one-line wrappers** that create a throwaway `chat()` and call the corresponding method. Same code, same behavior, zero duplication.
+2. **Every method has two forms**: a **Promise form** (the default — you `await` it and get the final result) and a **Stream form** (accessed via the `.stream` property — you `for await` it and receive typed events). Both forms go through the same internal SSE parser, so they share identical behavior.
+
+3. **Errors are always thrown exceptions, never stream chunks.** Both the Promise form and the Stream form throw the same typed exception classes (`QwenRateLimitedError`, `QwenUnauthorizedError`, etc.) on failure. Stream consumers wrap `for await` in `try/catch` exactly like Promise consumers wrap `await`. If the iterator emitted a `done` event, the request succeeded. If it didn't, the `for await` threw.
 
 ```js
 // These two snippets are literally equivalent:
@@ -58,7 +63,110 @@ const reply = await qwen.ask('hola');
 const reply = (await (await qwen.chat()).ask('hola')).reply;
 ```
 
-The top-level shortcuts exist for ergonomics when you don't need memory. The moment you want to carry context between calls, switch to `qwen.chat()` — everything else stays the same.
+---
+
+### Method contract
+
+| Method | Input | Promise form returns | Stream form events |
+|---|---|---|---|
+| `qwen.ask` / `chat.ask` | `(prompt, opts?)` | `string` / `{reply, turn, usage, thinking}` | `start → text → done` |
+| `qwen.search` / `chat.search` | `(query, opts?)` | `{reply, sources, usage}` / `{reply, sources, turn, usage}` | `start → tool_call → sources → text → done` |
+| `qwen.image` / `chat.image` | `(prompt, opts?)` | `{url, width, height, model}` | `start → info → image → done` |
+| `qwen.think` / `chat.think` | `(prompt, opts?)` | `{reply, thinking, usage}` / `{reply, thinking, turn, usage}` | `start → thinking → text → done` |
+
+**All four methods**:
+- Accept a plain string as the first argument.
+- Accept an `opts` object with at minimum `{ model?, system?, onDelta? }` for the top-level forms and `{ chatType?, chatMode?, thinking? }` for chat methods.
+- Have a `.stream` property that returns an async iterator over typed events.
+- Throw a `QwenError` subclass on failure (see Error handling below).
+
+---
+
+### Stream event types
+
+Every event has a `type` field. Consumers switch on it. The stream always terminates with a single `done` event carrying the aggregated result — if the stream ends without `done`, something threw.
+
+```js
+type QwenEvent =
+  | { type: 'start',      chatId, responseId, parentId }
+  | { type: 'thinking',   content, fullThinking }                        // phase === 'think'
+  | { type: 'text',       content, fullContent, phase }                  // phase === 'answer' / other text
+  | { type: 'tool_call',  name, arguments, phase, functionId }           // web_search function streaming
+  | { type: 'sources',    sources: [{url, title, snippet, date, hostname}] }
+  | { type: 'image',      url, width, height, extra }                    // phase === 'image_gen'
+  | { type: 'info',       info: { action: 'keep_alive', ... } }          // server keep-alive
+  | { type: 'done',       reply, thinking, sources, image, usage,
+                          responseId, parentId, turn, toolEvents }
+```
+
+A tighter, method-specific view of what you'll actually see:
+
+```
+qwen.ask.stream(prompt)     → start → text × N → done
+qwen.think.stream(prompt)   → start → thinking × N → text × N → done
+qwen.search.stream(query)   → start → tool_call × N → sources → text × N → done
+qwen.image.stream(prompt)   → start → info × N → image → done
+```
+
+---
+
+### Error handling
+
+All errors thrown by the library inherit from `QwenError`. Five subclasses cover every observed backend failure mode:
+
+| Class | `.code` | When it happens |
+|---|---|---|
+| `QwenRateLimitedError` | `RateLimited` | Daily guest quota hit on the current `bx-umidtoken`. `.retryAfterHours` hints when to retry (usually 6). Helpers auto-rotate once and retry transparently. |
+| `QwenUnauthorizedError` | `Unauthorized` | Tokens expired or invalid. Helpers auto-rotate once. |
+| `QwenBadRequestError` | `Bad_Request` | Client-side bug — malformed body, unsupported field combination, invalid chat_id. Not retried. |
+| `QwenServerError` | `Internal_Server_Error` | Backend error. Usually means you tried an unsupported guest feature (e.g., MCP tools). Not retried. |
+| `QwenNetworkError` | `NetworkError` | `fetch` failed at the transport layer (DNS, TLS, proxy). Wraps the original error on `.cause`. |
+
+**Use `instanceof` or `.code` — whichever is more ergonomic:**
+
+```js
+try {
+  const reply = await qwen.ask('hola');
+} catch (e) {
+  if (e instanceof qwen.QwenRateLimitedError) {
+    console.log(`retry in ${e.retryAfterHours}h`);
+  } else if (e.code === 'BadRequest') {
+    console.log('client bug:', e.message);
+  }
+}
+
+// Identical for streams — the iterator throws during for-await:
+try {
+  for await (const ev of qwen.ask.stream('hola')) {
+    if (ev.type === 'text') process.stdout.write(ev.content);
+  }
+} catch (e) {
+  if (e instanceof qwen.QwenRateLimitedError) { /* ... */ }
+}
+```
+
+All typed errors expose the same fields:
+```js
+e.code              // 'RateLimited' | 'Unauthorized' | 'Bad_Request' | ...
+e.status            // HTTP status if applicable
+e.retryAfterHours   // server hint for RateLimited (usually 6)
+e.response          // parsed envelope from the server
+e.cause             // original native error (QwenNetworkError only)
+```
+
+**Auto-retry**: the top-level helpers (`qwen.ask`, `qwen.search`, `qwen.image`, `qwen.think`) automatically rotate the session on `RateLimited` / `Unauthorized` and retry the request once. The chat methods do NOT auto-retry (rotating would create a different `chat_id` and lose memory). If you want retry with a chat, catch the error yourself and rebuild the chat:
+
+```js
+try {
+  await chat.ask('...');
+} catch (e) {
+  if (e instanceof qwen.QwenRateLimitedError) {
+    await qwen.warmup({ forceRefresh: true });
+    chat = await qwen.chat({ ...originalOpts });  // new chat_id, fresh quota
+    await chat.ask('...');
+  }
+}
+```
 
 ---
 
@@ -128,115 +236,16 @@ await chat.ask('ahora en Vue', { chatType: 'web_dev' }); // per-turn override
 
 ---
 
-### `qwen.ask(prompt, opts?)` → `string`
-
-Plain text-to-text. Returns just the reply as a string.
-
-```js
-await qwen.ask('¿Cuál es la capital de Francia?');
-// → 'París'
-
-await qwen.ask('hola', { system: 'Respondé en ruso corto.' });
-// → 'Привет'
-
-// Stream tokens as they arrive:
-await qwen.ask('contá del 1 al 5', {
-  onDelta: (ev) => process.stdout.write(ev.content),
-});
-```
-
-**Options:** `{ model?, system?, onDelta? }`
-
----
-
-### `qwen.search(query, opts?)` → `{ reply, sources, usage }`
-
-Activates Qwen's built-in web search tool. Returns the model's written answer **and** the structured list of sources it pulled from the web.
-
-```js
-const { reply, sources } = await qwen.search(
-  'Dame 3 noticias de tecnología de esta semana con links'
-);
-console.log(reply);  // "Aquí tienes un resumen..."
-for (const s of sources) {
-  console.log(`- ${s.title}`);
-  console.log(`  ${s.url}`);
-  console.log(`  ${s.snippet}`);
-}
-```
-
-**Sources shape:** `[{ url, title, snippet, date, hostname }]` — deduplicated by URL, typically 5–30 entries per turn. If the model answers from its own knowledge without searching (e.g., "capital of France"), `sources` is an empty array.
-
-**Options:** `{ model?, system?, onDelta? }`
-
----
-
-### `qwen.image(prompt, opts?)` → `{ url, width, height, model }`
-
-Generates a 2048×2048 image and returns a **signed, time-limited** URL on Qwen's CDN (`cdn.qwenlm.ai`). Download the PNG right away if you need to keep it — the JWT in the URL expires.
-
-```js
-const { url, width, height } = await qwen.image(
-  'Un gato naranja montando una bicicleta roja al atardecer, estilo acuarela'
-);
-const res = await fetch(url);
-fs.writeFileSync('cat.png', Buffer.from(await res.arrayBuffer()));
-```
-
-Typical response time: **10–20 seconds**. Each image costs 1 of the guest daily image quota slots (defaults to ~5/day per device).
-
-**Options:** `{ model? }`
-
----
-
-### `qwen.think(prompt, opts?)` → `{ reply, thinking, usage }`
-
-Enables the model's chain-of-thought phase. You get **both** the internal reasoning and the final answer as separate fields.
-
-```js
-const { reply, thinking } = await qwen.think(
-  'Un tren sale de Buenos Aires a 80 km/h hacia Mar del Plata (400 km). ' +
-  'Otro sale de Mar del Plata a 60 km/h simultáneamente. ' +
-  '¿Cuándo se cruzan? Resolvé paso a paso.'
-);
-console.log('THINKING:', thinking);  // "The user is asking a physics problem..."
-console.log('ANSWER:  ', reply);      // "Los trenes se cruzan después de 20/7 h ≈ 2h 51min"
-```
-
-**Options:** `{ model?, system?, onDelta? }`
-
----
-
 ### `qwen.warmup({ forceRefresh?: boolean }?)` → `{ ok, createdAt, expiresIn }`
 
 Pre-warms the session so the first user request doesn't pay the jsdom + umid-server boot cost (~15 s on cold start). Call this once during container startup.
 
 ```js
-await qwen.warmup();             // use cache if valid
+await qwen.warmup();                        // use cache if valid
 await qwen.warmup({ forceRefresh: true });  // force a new bx-umidtoken (new quota!)
 ```
 
 This is also your escape hatch for `RateLimited` errors — `forceRefresh: true` mints a new device token and resets the per-device guest quota.
-
----
-
-### Error handling
-
-All helpers throw structured `Error` objects on failure. The most important fields:
-
-```js
-try {
-  await qwen.ask('…');
-} catch (e) {
-  e.message          // human-readable
-  e.code             // 'RateLimited' | 'Unauthorized' | 'Bad_Request' | 'Internal_Server_Error'
-  e.status           // HTTP status if applicable
-  e.retryAfterHours  // server hint for RateLimited (typically 6)
-  e.response         // raw parsed JSON envelope
-}
-```
-
-**The `qwen.ask` / `.search` / `.image` / `.think` helpers automatically auto-rotate the session on `RateLimited` and retry once** (see the `retryOnAuthFail: true` default on `qwen()`). For long-lived processes you can still catch the error after the retry fails and escalate to your app-level fallback.
 
 ---
 
@@ -302,8 +311,10 @@ qwen/
         ├── session.js         ← cached session lifecycle (25 min TTL)
         ├── sse.js             ← minimal Server-Sent-Events parser
         ├── messages.js        ← OpenAI-style [msgs] → Qwen single prompt
+        ├── errors.js          ← QwenError hierarchy (typed exceptions)
         ├── http.js            ← low-level createChat + streamChatCompletion
-        └── conversation.js    ← stateful multi-turn wrapper
+        ├── conversation.js    ← stateful multi-turn (send + stream)
+        └── helpers.js         ← chat/ask/search/image/think + .stream
 ```
 
 ### What each file does, in one line
@@ -321,8 +332,10 @@ qwen/
 | **`src/lib/session.js`** | Disk-cached session lifecycle. `loadCachedSession()` / `saveSession()` / `makeGetSession({ensureJsdomEnv})` factory returning an async `getSession({forceRefresh})` that coalesces concurrent callers. TTL matches `acw_tc` (25 min). |
 | **`src/lib/sse.js`** | `parseSSEBlock(blockText)` — tiny parser for one `data: {json}\n\n` frame. Returns the parsed JSON or `null` on malformed input. |
 | **`src/lib/messages.js`** | `flattenMessages([...])` — converts an OpenAI-style messages array (system/user/assistant/...) into a single prompt string that Qwen's one-message-per-turn API can consume. |
-| **`src/lib/http.js`** | `baseHeaders(session, extra)`, `createChat(session, opts)`, and `streamChatCompletion(session, chatId, prompt, opts)`. The async iterator yields `created` / `info` / `delta` / `tool` / `finished` events. Throws structured errors for non-SSE responses (RateLimited, Unauthorized, Bad_Request). |
-| **`src/lib/conversation.js`** | `makeConversation({getSession})` factory returning `async conversation(opts)` → `{ chatId, turn, history, lastResponseId, send }`. Reuses one `chat_id` across turns and chains `parent_id` for real server-side memory. Returns rich per-turn results including `toolEvents` (citations, image URLs). |
+| **`src/lib/errors.js`** | Typed `QwenError` hierarchy (`QwenRateLimitedError`, `QwenUnauthorizedError`, `QwenBadRequestError`, `QwenServerError`, `QwenNetworkError`) + `errorFromEnvelope()` / `wrapNetworkError()` factories. Every helper and stream throws one of these on failure — never a plain `Error`. |
+| **`src/lib/http.js`** | `baseHeaders(session, extra)`, `createChat(session, opts)`, and `streamChatCompletion(session, chatId, prompt, opts)`. The async iterator yields `created` / `info` / `delta` / `tool` / `finished` events. Throws typed `QwenError` subclasses for non-SSE responses (RateLimited, Unauthorized, Bad_Request, Internal_Server_Error, NetworkError). |
+| **`src/lib/conversation.js`** | `makeConversation({getSession})` factory returning `async conversation(opts)` → `{ chatId, turn, history, lastResponseId, send, stream }`. Both forms go through the same internal `_sendStream` generator that emits typed events (`start`, `text`, `thinking`, `tool_call`, `sources`, `image`, `info`, `done`). `.send()` collects the stream to a done payload; `.stream()` exposes the iterator. |
+| **`src/lib/helpers.js`** | `makeHelpers({ conversation })` — builds the practical API surface. `chat()` is the primitive, returning a handle with `ask/search/image/think` methods each exposing a `.stream` property for the iterator form. The top-level `ask/search/image/think` are 1-line wrappers that create a throwaway chat. |
 | **`server.js`** | Standalone HTTP server. Calls `qwen.warmup()` on boot, then serves `/healthz`, `/v1/chat/completions`, `/v1/conversations[/:id/messages]`. Auto-rotates session on `RateLimited`. Drop-in Docker entrypoint. |
 | **`build-bundle.js`** | Reads AWSC files from the disk cache and emits `dist/src/lib/awsc-scripts.js` with an `EMBEDDED_AWSC = { awsc, collina, um }` literal containing gzipped+base64 versions. The resulting `dist/` can be copied into a container as-is — no network needed at boot for the SDK download. |
 
