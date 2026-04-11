@@ -1,26 +1,16 @@
-// src/lib/http.js
-// Low-level Qwen API calls. Nothing here knows about OpenAI-style
-// messages, session caching, or multi-turn state — those live one level up.
-//
-// Exports:
-//   baseHeaders(session, extra?)           — assembles the 13 headers every
-//                                             request needs (bx-ua, bx-umid,
-//                                             Cookie, etc.) from a Session.
-//   createChat(session, opts?)             — POST /api/v2/chats/new → chat_id
-//   streamChatCompletion(session, chatId,  — async iterator that yields
-//                        prompt, opts?)      structured events from the SSE.
-'use strict';
-
-const crypto = require('node:crypto');
-const { BASE, API, SPA_VERSION, DEFAULT_MODEL } = require('./constants');
-const { parseSSEBlock } = require('./sse');
-const {
+// src/lib/http.ts
+// Low-level Qwen API calls. Throws typed QwenError subclasses on failure.
+import * as crypto from 'node:crypto';
+import { BASE, API, SPA_VERSION, DEFAULT_MODEL } from './constants';
+import { parseSSEBlock } from './sse';
+import {
   QwenError,
   errorFromEnvelope,
   wrapNetworkError,
-} = require('./errors');
+} from './errors';
+import type { SavedSession, ChatType, ChatMode, QwenModel } from './types';
 
-function baseHeaders(session, extra = {}) {
+export function baseHeaders(session: SavedSession, extra: Record<string, string> = {}): Record<string, string> {
   return {
     Accept: 'application/json, text/plain, */*',
     'Accept-Language': 'en-US',
@@ -29,9 +19,6 @@ function baseHeaders(session, extra = {}) {
     Referer: BASE + '/',
     'User-Agent': session.userAgent,
     Version: SPA_VERSION,
-    // The Qwen frontend puts `source: web` on every request, and its own
-    // request interceptor explicitly strips any Authorization header when
-    // source=web. That's how guest auth works: it's 100% cookies + bx-*.
     source: 'web',
     'X-Request-Id': crypto.randomUUID(),
     'bx-ua': session.bxUa,
@@ -42,12 +29,23 @@ function baseHeaders(session, extra = {}) {
   };
 }
 
-async function createChat(session, {
-  model = DEFAULT_MODEL,
-  chatMode = 'normal',
-  chatType = 't2t',
-} = {}) {
-  let res;
+export interface CreateChatOptions {
+  model?: QwenModel;
+  chatMode?: ChatMode;
+  chatType?: ChatType;
+}
+
+export async function createChat(
+  session: SavedSession,
+  opts: CreateChatOptions = {}
+): Promise<string> {
+  const {
+    model = DEFAULT_MODEL,
+    chatMode = 'normal',
+    chatType = 't2t',
+  } = opts;
+
+  let res: Response;
   try {
     res = await fetch(`${API}/chats/new`, {
       method: 'POST',
@@ -57,48 +55,59 @@ async function createChat(session, {
         models: [model],
         chat_mode: chatMode,
         chat_type: chatType,
-        // NOTE: chats/new uses milliseconds; chat/completions uses seconds.
-        // Yes, it's inconsistent on Qwen's side. Don't try to unify it.
         timestamp: Date.now(),
       }),
     });
-  } catch (e) {
+  } catch (e: any) {
     throw wrapNetworkError(e, 'createChat: fetch failed');
   }
+
   const text = await res.text();
-  let json = null;
-  try { json = JSON.parse(text); } catch (_) {}
+  let json: any = null;
+  try { json = JSON.parse(text); } catch {}
   if (json && json.success === false) {
     throw errorFromEnvelope(json, text);
   }
   if (!res.ok || !json || json.success !== true) {
-    throw new QwenError(`createChat failed HTTP ${res.status}: ${text.slice(0, 300)}`, {
-      status: res.status,
-      response: json || text,
-    });
+    throw new QwenError(
+      `createChat failed HTTP ${res.status}: ${text.slice(0, 300)}`,
+      { status: res.status, response: json || text }
+    );
   }
   return json.data.id;
 }
 
-// Async generator over the SSE stream. Yields events of the following shapes:
-//
-//   { type: 'created',   chatId, parentId, responseId }
-//   { type: 'info',      info: <response.info payload> }   // keep-alive etc.
-//   { type: 'delta',     content, fullContent, phase, role, usage,
-//                        functionCall, functionId, extra }
-//   { type: 'tool',      phase, role, functionCall, functionId, name, extra }
-//   { type: 'finished',  fullContent, responseId }
-//
-// Errors returned as HTTP 200 + application/json (RateLimited, Unauthorized,
-// Bad_Request, Internal_Server_Error) are thrown as structured Error objects
-// with .code / .status / .retryAfterHours / .response fields.
-async function* streamChatCompletion(session, chatId, prompt, {
-  model = DEFAULT_MODEL,
-  chatMode = 'normal',
-  chatType = 't2t',
-  parentId = null,
-  thinkingEnabled = false,
-} = {}) {
+// Raw events yielded by streamChatCompletion. These are then translated
+// into the typed "StreamEvent" shape by conversation.ts.
+export type RawEvent =
+  | { type: 'created'; chatId: string; responseId: string | null; parentId: string | null }
+  | { type: 'info'; info: any }
+  | { type: 'delta'; content: string; fullContent: string; phase: string | undefined; role: string | undefined; usage: any; functionCall: any; functionId: any; extra: any }
+  | { type: 'tool'; phase: string; role: string; functionCall: any; functionId: any; name: string; extra: any }
+  | { type: 'finished'; fullContent: string; responseId: string | null };
+
+export interface StreamOptions {
+  model?: QwenModel;
+  chatMode?: ChatMode;
+  chatType?: ChatType;
+  parentId?: string | null;
+  thinkingEnabled?: boolean;
+}
+
+export async function* streamChatCompletion(
+  session: SavedSession,
+  chatId: string,
+  prompt: string,
+  opts: StreamOptions = {}
+): AsyncGenerator<RawEvent, void, void> {
+  const {
+    model = DEFAULT_MODEL,
+    chatMode = 'normal',
+    chatType = 't2t',
+    parentId = null,
+    thinkingEnabled = false,
+  } = opts;
+
   const body = {
     stream: true,
     version: '2.1',
@@ -107,8 +116,6 @@ async function* streamChatCompletion(session, chatId, prompt, {
     chat_mode: chatMode,
     model,
     parent_id: parentId,
-    // Qwen rejects messages.length > 1 with "Invalid input too many messages."
-    // History is tracked server-side via chat_id + parent_id.
     messages: [
       {
         role: 'user',
@@ -122,7 +129,7 @@ async function* streamChatCompletion(session, chatId, prompt, {
     timestamp: Math.floor(Date.now() / 1000),
   };
 
-  let res;
+  let res: Response;
   try {
     res = await fetch(
       `${API}/chat/completions?chat_id=${encodeURIComponent(chatId)}`,
@@ -135,7 +142,7 @@ async function* streamChatCompletion(session, chatId, prompt, {
         body: JSON.stringify(body),
       }
     );
-  } catch (e) {
+  } catch (e: any) {
     throw wrapNetworkError(e, 'streamChatCompletion: fetch failed');
   }
 
@@ -147,21 +154,19 @@ async function* streamChatCompletion(session, chatId, prompt, {
     });
   }
 
-  // Error responses come back as 200 OK with application/json — NOT as SSE.
-  // Parse the envelope and dispatch to the appropriate QwenError subclass.
   const ct = res.headers.get('content-type') || '';
   if (!ct.includes('text/event-stream')) {
     const text = await res.text().catch(() => '');
-    let parsed = null;
-    try { parsed = JSON.parse(text); } catch (_) {}
+    let parsed: any = null;
+    try { parsed = JSON.parse(text); } catch {}
     throw errorFromEnvelope(parsed, text);
   }
 
-  const reader = res.body.getReader();
+  const reader = (res.body as any).getReader();
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
   let fullContent = '';
-  let responseId = null;
+  let responseId: string | null = null;
 
   while (true) {
     const { value, done } = await reader.read();
@@ -194,9 +199,7 @@ async function* streamChatCompletion(session, chatId, prompt, {
       if (!choice || !choice.delta) continue;
       const delta = choice.delta;
 
-      // Tool-call / tool-result event. We emit these FIRST because the
-      // tool_result frame arrives with `status: "finished"` and we must
-      // not swallow it as the turn's terminal event below.
+      // Record tool events FIRST — tool_result arrives with status:finished
       if (delta.function_call || (delta.extra && delta.extra.tool_result)) {
         yield {
           type: 'tool',
@@ -207,8 +210,6 @@ async function* streamChatCompletion(session, chatId, prompt, {
           name: delta.name,
           extra: delta.extra,
         };
-        // Tool results usually carry no text content, but don't `continue`
-        // just in case future frames combine both. Fall through.
       }
 
       if (delta.status === 'finished') {
@@ -216,7 +217,6 @@ async function* streamChatCompletion(session, chatId, prompt, {
         continue;
       }
 
-      // Typed content delta (usually phase: "answer" or "think")
       if (typeof delta.content === 'string' && delta.content.length) {
         fullContent += delta.content;
         yield {
@@ -234,5 +234,3 @@ async function* streamChatCompletion(session, chatId, prompt, {
     }
   }
 }
-
-module.exports = { baseHeaders, createChat, streamChatCompletion };

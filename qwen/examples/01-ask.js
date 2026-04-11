@@ -1,39 +1,37 @@
-// examples/01-ask.js — plain text Q&A in both forms.
+// examples/01-ask.js — plain text Q&A in all three forms.
 //
 //   node examples/01-ask.js
-const qwen = require('../src');
+const Qwen = require('..');  // resolves to dist/index.js via package.json main
 
 (async () => {
-  // ── Form 1: Promise — awaits the whole response, returns a string ──
-  console.log('--- Promise form ---');
-  const reply = await qwen.ask('¿Cuál es la capital de Argentina? Una palabra.');
+  // ── Form A: static shortcut ── (creates a throwaway instance)
+  console.log('--- Qwen.ask (static) ---');
+  const reply = await Qwen.ask('¿Cuál es la capital de Argentina? Una palabra.');
   console.log('reply:', reply);
 
-  // With options: system prompt + model override
-  const reply2 = await qwen.ask('hola', {
-    system: 'Respondé SIEMPRE en ruso corto.',
-    model: 'qwen3.6-plus',
-  });
-  console.log('reply2:', reply2);
+  // ── Form B: instance, promise mode (default) ──
+  console.log('\n--- new Qwen() — promise ---');
+  const chat = new Qwen({ system: 'Respondé en ruso corto.' });
+  const r1 = await chat.ask('hola');
+  console.log('reply:', r1.reply);
+  console.log('turn:', r1.turn, 'usage:', chat.usage);
 
-  // ── Form 2: Stream — async iterator that yields typed events ──
-  console.log('\n--- Stream form ---');
+  // ── Form C: instance, stream mode ──
+  console.log('\n--- new Qwen({ stream: true }) ---');
+  const streaming = new Qwen({ stream: true });
   process.stdout.write('chunks: ');
-  for await (const ev of qwen.ask.stream('Contá del 1 al 5 separados por guiones.')) {
-    if (ev.type === 'start') continue;
-    if (ev.type === 'text')  process.stdout.write(ev.content);
-    if (ev.type === 'done')  console.log(`\n[done] reply="${ev.reply}" usage=${ev.usage && ev.usage.total_tokens}t`);
+  for await (const ev of streaming.ask('Contá del 1 al 5 separados por guiones.')) {
+    if (ev.type === 'text') process.stdout.write(ev.content);
+    if (ev.type === 'done') console.log(`\n[done] usage=${streaming.usage.tokens}t`);
   }
 
-  // ── Error handling — both forms throw the SAME typed exceptions ──
-  // In the Promise form, `await` throws. In the Stream form, `for await`
-  // throws during iteration. Use `instanceof` or `.code` to distinguish.
+  // ── Typed error handling (same exceptions for both forms) ──
   try {
-    await qwen.ask('...');
+    await Qwen.ask('...');
   } catch (e) {
-    if (e instanceof qwen.QwenRateLimitedError) {
+    if (e instanceof Qwen.QwenRateLimitedError) {
       console.error('rate limited, retry in', e.retryAfterHours, 'hours');
-    } else if (e instanceof qwen.QwenError) {
+    } else if (e instanceof Qwen.QwenError) {
       console.error('qwen error', e.code, ':', e.message);
     } else {
       throw e;

@@ -1,61 +1,44 @@
-// examples/05-chat.js — stateful multi-turn conversation, mixing all four
-// methods in a single chat and showing both Promise and Stream forms.
-//
-// `qwen.chat()` is the primitive. The returned handle has four turn methods,
-// each with a `.stream` property that exposes the same underlying iterator.
-//
-//   chat.ask(msg)          ← plain text turn
-//   chat.search(q)         ← this turn uses web search
-//   chat.image(p)          ← this turn generates an image
-//   chat.think(msg)        ← this turn enables thinking
-//
-//   chat.ask.stream(msg)   ← streaming version of each (async iterator)
-//   chat.search.stream(q)
-//   chat.image.stream(p)
-//   chat.think.stream(msg)
+// examples/05-chat.js — stateful multi-turn chat, mixing all four methods.
 //
 //   node examples/05-chat.js
-const qwen = require('../src');
+const Qwen = require('..');
 
 (async () => {
-  const chat = await qwen.chat({
+  const chat = new Qwen({
     model: 'qwen3.6-plus',
     system: 'Sos un asistente argentino muy breve. Menos de 25 palabras.',
   });
-  console.log('chat_id:', chat.chatId);
+  console.log('model:', chat.options.model);
 
-  // ── Promise form: classic request/response ──
+  // Turn 1 — plain ask
   let r = await chat.ask('Me llamo Ariel y vivo en Rosario.');
-  console.log(`\n[${r.turn}] ask → ${r.reply}`);
+  console.log(`\n[turn ${r.turn}] ask → ${r.reply}`);
+  console.log(`  chat_id: ${chat.chatId}`);
 
-  // Memory from turn 1
+  // Turn 2 — memory from turn 1
   r = await chat.ask('¿Cómo me llamo y de dónde soy?');
-  console.log(`[${r.turn}] ask → ${r.reply}`);
+  console.log(`[turn ${r.turn}] ask → ${r.reply}`);
 
-  // ── Stream form: same turn but as a live iterator ──
-  process.stdout.write(`\n[next] ask.stream → `);
-  for await (const ev of chat.ask.stream('En una oración, qué hacés vos como asistente.')) {
-    if (ev.type === 'text') process.stdout.write(ev.content);
-    if (ev.type === 'done') console.log(`\n[done turn=${ev.turn}]`);
-  }
-
-  // Mix turn types in the same chat — memory persists across all of them
+  // Turn 3 — search within the same chat
   const s = await chat.search('¿Qué temperatura hay ahora en mi ciudad?');
-  console.log(`\n[${s.turn}] search → ${s.reply}`);
-  console.log(`   sources: ${s.sources.length} (${s.sources.slice(0, 2).map((x) => x.hostname || '…').join(', ')})`);
+  console.log(`\n[turn ${s.turn}] search → ${s.reply}`);
+  console.log(`   sources: ${s.sources.length}`);
 
+  // Turn 4 — think + plan (still remembers everything)
   const t = await chat.think('Dame un plan de 3 pasos para aprender JavaScript en 1 mes.');
-  console.log(`\n[${t.turn}] think → ${t.reply.slice(0, 200)}...`);
-  console.log(`   thinking: ${(t.thinking || '').slice(0, 120)}...`);
+  console.log(`\n[turn ${t.turn}] think → ${t.reply.slice(0, 200)}...`);
+  if (t.thinking) console.log(`   thinking: ${t.thinking.slice(0, 120)}...`);
 
-  // Final turn, aware of all previous context
-  r = await chat.ask('En una frase, resumí todo lo que hablamos hasta ahora.');
-  console.log(`\n[${r.turn}] ask → ${r.reply}`);
+  // Final turn — recall everything
+  r = await chat.ask('En una frase, resumí lo que hablamos.');
+  console.log(`\n[turn ${r.turn}] ask → ${r.reply}`);
 
-  console.log(`\ntotal turns: ${chat.turn}, history entries: ${chat.history.length}`);
+  console.log(`\ntotal turns: ${chat.usage.requests}`);
+  console.log(`tokens: ${chat.usage.tokens} (in=${chat.usage.input}, out=${chat.usage.output})`);
+  console.log(`history entries: ${chat.history.length}`);
 })().catch((e) => {
-  if (e instanceof qwen.QwenRateLimitedError) {
-    console.error(`rate limited — retry in ${e.retryAfterHours} hours`);
+  if (e instanceof Qwen.QwenRateLimitedError) {
+    console.error(`rate limited — retry in ${e.retryAfterHours}h`);
   } else {
     console.error('error:', e.constructor.name, e.message);
   }

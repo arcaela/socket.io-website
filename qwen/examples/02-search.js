@@ -1,20 +1,13 @@
 // examples/02-search.js — web search with structured citations.
 //
-// `search` activates Qwen's built-in web_search tool. The Promise form
-// returns the accumulated reply + deduped sources. The Stream form emits:
-//   { type: 'tool_call', name: 'web_search', arguments: '<streamed JSON>' }
-//   { type: 'sources',   sources: [{url,title,snippet,date,hostname}] }
-//   { type: 'text',      content, fullContent }
-//   { type: 'done',      reply, sources, usage }
-//
 //   node examples/02-search.js
-const qwen = require('../src');
+const Qwen = require('..');
 
 (async () => {
-  // ── Promise form ──
-  console.log('--- Promise form ---');
-  const { reply, sources, usage } = await qwen.search(
-    'Dame 3 noticias de tecnología de los últimos días con fuentes reales'
+  // ── static shortcut ──
+  console.log('--- Qwen.search (static) ---');
+  const { reply, sources, usage } = await Qwen.search(
+    'Dame 3 noticias de tecnología de los últimos días con fuentes'
   );
   console.log('reply:', reply.slice(0, 200) + '...');
   console.log(`\nsources (${sources.length}):`);
@@ -24,23 +17,19 @@ const qwen = require('../src');
   }
   console.log('\nusage:', usage && usage.total_tokens, 'tokens');
 
-  // ── Stream form ──
-  console.log('\n--- Stream form ---');
-  await qwen.warmup({ forceRefresh: true });  // new session to avoid quota bleed
-  for await (const ev of qwen.search.stream('¿Quién ganó el Oscar 2026 a mejor película?')) {
-    if (ev.type === 'tool_call') {
-      process.stdout.write('.');                  // searching...
-    } else if (ev.type === 'sources') {
-      console.log(`\nreceived ${ev.sources.length} sources`);
-    } else if (ev.type === 'text') {
-      process.stdout.write(ev.content);
-    } else if (ev.type === 'done') {
-      console.log(`\n\n[done] ${ev.sources.length} sources total`);
-    }
+  // ── instance, stream mode — watch tool_call / sources / text events live ──
+  console.log('\n--- new Qwen({ stream: true }).search ---');
+  await Qwen.warmup({ forceRefresh: true });  // avoid quota bleed
+  const chat = new Qwen({ stream: true });
+  for await (const ev of chat.search('¿Quién ganó el Oscar 2026 a mejor película?')) {
+    if (ev.type === 'tool_call') process.stdout.write('.');   // searching...
+    else if (ev.type === 'sources') console.log(`\nreceived ${ev.sources.length} sources`);
+    else if (ev.type === 'text') process.stdout.write(ev.content);
+    else if (ev.type === 'done') console.log(`\n\n[done] ${(ev.sources || []).length} sources`);
   }
 })().catch((e) => {
-  if (e instanceof qwen.QwenRateLimitedError) {
-    console.error(`rate limited — retry in ${e.retryAfterHours} hours`);
+  if (e instanceof Qwen.QwenRateLimitedError) {
+    console.error(`rate limited — retry in ${e.retryAfterHours}h`);
   } else {
     console.error('error:', e.constructor.name, e.message);
   }

@@ -1,34 +1,23 @@
-// src/lib/conversation.js
-// Stateful multi-turn conversation handle. Wraps a single `chat_id` and
-// chains `parent_id` across turns so Qwen's backend tracks history
-// server-side.
-//
-// Exposes TWO forms per turn:
-//
-//   conv.send(message, opts?)       → Promise<result>
-//       Collects the entire response and returns an object with everything
-//       the caller needs: reply, thinking, sources, usage, etc.
-//
-//   conv.stream(message, opts?)     → AsyncIterable<TypedEvent>
-//       Yields discrete, discriminated-union events as the server streams.
-//       Always ends with a { type: 'done', ... } event carrying the same
-//       aggregated data that .send() would have returned. Errors throw
-//       during iteration — never arrive as chunks.
-//
-// Both forms go through the same underlying _sendStream() generator so
-// they share the same state mutation (lastResponseId, turn counter, history).
-'use strict';
+// src/lib/conversation.ts
+// Stateful multi-turn conversation handle with send() + stream() forms
+// emitting typed events.
+import { API, DEFAULT_MODEL } from './constants';
+import { baseHeaders, createChat, streamChatCompletion } from './http';
+import { QwenError } from './errors';
+import type {
+  QwenModel,
+  ChatMode,
+  ChatType,
+  SavedSession,
+  Source,
+  StreamEvent,
+  DoneEvent,
+  Message,
+  TurnUsage,
+} from './types';
 
-const { API, DEFAULT_MODEL } = require('./constants');
-const { baseHeaders, streamChatCompletion } = require('./http');
-const { QwenError } = require('./errors');
-
-// -------- source extractor (shared with helpers) --------
-
-// Pulls { url, title, snippet, date, hostname } records out of a tool
-// event that carries a web_search tool_result. Deduped by URL.
-function extractSourcesFromToolEvent(ev) {
-  const out = [];
+function extractSourcesFromToolEvent(ev: any): Source[] {
+  const out: Source[] = [];
   const docs = ev && ev.extra && ev.extra.tool_result && ev.extra.tool_result.docs;
   if (!docs || !Array.isArray(docs)) return out;
   for (const doc of docs) {
@@ -44,49 +33,83 @@ function extractSourcesFromToolEvent(ev) {
   return out;
 }
 
-function makeConversation({ getSession }) {
-  return async function conversation(opts = {}) {
+export interface ConversationOptions {
+  model?: QwenModel;
+  chatMode?: ChatMode;
+  chatType?: ChatType;
+  system?: string | null;
+  thinking?: boolean;
+  /** Skip creating a new chat — reuse this existing chat_id. */
+  chatId?: string;
+  /** Seed lastResponseId for parent_id chaining. */
+  lastResponseId?: string | null;
+}
+
+export interface SendOptions {
+  chatType?: ChatType;
+  chatMode?: ChatMode;
+  thinking?: boolean;
+}
+
+export interface Conversation {
+  readonly chatId: string;
+  readonly model: QwenModel;
+  readonly chatMode: ChatMode;
+  readonly chatType: ChatType;
+  readonly turn: number;
+  readonly history: Message[];
+  readonly lastResponseId: string | null;
+  send(message: string, sendOpts?: SendOptions): Promise<DoneEvent>;
+  stream(message: string, sendOpts?: SendOptions): AsyncGenerator<StreamEvent, void, void>;
+}
+
+export interface GetSessionFn {
+  (opts?: { forceRefresh?: boolean }): Promise<SavedSession>;
+}
+
+export function makeConversation({ getSession }: { getSession: GetSessionFn }) {
+  return async function conversation(opts: ConversationOptions = {}): Promise<Conversation> {
     const {
       model = DEFAULT_MODEL,
       chatMode = 'normal',
       chatType = 't2t',
       system = null,
       thinking = false,
+      chatId: existingChatId,
+      lastResponseId: seedLastResponseId = null,
     } = opts;
 
     const session = await getSession();
-    const { createChat } = require('./http');
-    const chatId = await createChat(session, { model, chatMode, chatType });
 
-    // Mutable per-conversation state
-    let lastResponseId = null;
+    // If the caller provided an existing chatId (session recovery), reuse
+    // it. Otherwise create a fresh one on the backend.
+    const chatId: string = existingChatId || (await createChat(session, { model, chatMode, chatType }));
+
+    let lastResponseId: string | null = seedLastResponseId;
     let turnCount = 0;
-    const history = [];
+    const history: Message[] = [];
+    // Track whether the system prompt has been injected yet (it goes on
+    // the first turn only to save tokens on subsequent turns).
+    let systemInjected = existingChatId != null; // assume already done if resuming
 
-    // The canonical send path. Returns an async generator that emits
-    // typed events and, as its FINAL event, a `done` with the aggregated
-    // result. All state mutation (turn++, history.push, lastResponseId)
-    // happens right before the done event is emitted.
-    async function* _sendStream(message, sendOpts = {}) {
+    async function* _sendStream(message: string, sendOpts: SendOptions = {}): AsyncGenerator<StreamEvent, void, void> {
       const useChatType = sendOpts.chatType || chatType;
       const useChatMode = sendOpts.chatMode || chatMode;
       const useThinking = sendOpts.thinking != null ? sendOpts.thinking : thinking;
 
-      // System prompt is injected ONLY on the first turn — the backend
-      // remembers it afterwards via chat_id, so repeating wastes tokens.
       let prompt = message;
-      if (system && turnCount === 0) {
+      if (system && !systemInjected) {
         prompt = `[Instrucciones del sistema]\n${system}\n\n[Mensaje del usuario]\n${message}`;
+        systemInjected = true;
       }
 
-      // Accumulators — these fill up as the lower-level iterator yields.
       let answerText = '';
       let thinkingText = '';
-      let usage = null;
-      let responseId = null;
-      const sources = [];
-      const toolEvents = [];
-      let imageMeta = null;
+      let usage: TurnUsage | null = null;
+      let responseId: string | null = null;
+      const sources: Source[] = [];
+      const toolEvents: any[] = [];
+      let imageMeta: { url: string; width: number | null; height: number | null } | null = null;
 
       for await (const ev of streamChatCompletion(session, chatId, prompt, {
         model,
@@ -107,7 +130,6 @@ function makeConversation({ getSession }) {
         }
 
         if (ev.type === 'info') {
-          // keep_alive and similar side-channel metadata
           yield { type: 'info', info: ev.info };
           continue;
         }
@@ -115,8 +137,6 @@ function makeConversation({ getSession }) {
         if (ev.type === 'tool') {
           toolEvents.push(ev);
 
-          // A tool call arrives in two waves: first the function_call args
-          // stream in, then a tool_result arrives with the output.
           if (ev.functionCall) {
             yield {
               type: 'tool_call',
@@ -152,8 +172,6 @@ function makeConversation({ getSession }) {
           }
 
           if (ev.phase === 'image_gen') {
-            // The `content` field IS the signed CDN URL. Dimensions come
-            // from the same delta's usage object (width/height/image_count).
             imageMeta = {
               url: (ev.content || '').trim(),
               width: (ev.usage && ev.usage.width) || null,
@@ -169,7 +187,6 @@ function makeConversation({ getSession }) {
             continue;
           }
 
-          // Default: phase === 'answer' or similar text phase
           answerText += ev.content;
           yield {
             type: 'text',
@@ -181,14 +198,12 @@ function makeConversation({ getSession }) {
         }
 
         if (ev.type === 'finished') {
-          // Don't yield anything here — the `done` event below carries the
-          // same information plus the collected result.
           if (ev.responseId) responseId = ev.responseId;
           continue;
         }
       }
 
-      // -- state mutation + done event --
+      // ---- state mutation + terminal done event ----
       if (responseId) lastResponseId = responseId;
       turnCount += 1;
       history.push({ role: 'user', content: message });
@@ -198,30 +213,27 @@ function makeConversation({ getSession }) {
         thinking: thinkingText || undefined,
       });
 
-      yield {
+      const done: DoneEvent = {
         type: 'done',
         reply: answerText,
         thinking: thinkingText || null,
         sources: sources.length ? sources : null,
         image: imageMeta,
+        usage,
         responseId,
         parentId: lastResponseId,
         turn: turnCount,
-        usage,
         toolEvents,
       };
+      yield done;
     }
 
-    // Public iterator form. Note: consumers who want the collected result
-    // should either use .send() or look for the final `done` event.
-    function stream(message, sendOpts = {}) {
+    function stream(message: string, sendOpts: SendOptions = {}) {
       return _sendStream(message, sendOpts);
     }
 
-    // Public collected form. Runs the iterator to completion and returns
-    // the payload of the terminal `done` event.
-    async function send(message, sendOpts = {}) {
-      let done = null;
+    async function send(message: string, sendOpts: SendOptions = {}): Promise<DoneEvent> {
+      let done: DoneEvent | null = null;
       for await (const ev of _sendStream(message, sendOpts)) {
         if (ev.type === 'done') done = ev;
       }
@@ -244,5 +256,3 @@ function makeConversation({ getSession }) {
     };
   };
 }
-
-module.exports = { makeConversation, extractSourcesFromToolEvent };

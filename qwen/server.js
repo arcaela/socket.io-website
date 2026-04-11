@@ -1,40 +1,33 @@
 #!/usr/bin/env node
-// server.js — tiny HTTP front for `require('./src')`. Designed to be the
-// main process of a Docker container, so one qwen() client is warmed up
-// and reused across every request.
-//
-//   PORT                   listening port (default 8787)
-//   QWEN_CACHE_DIR         override session cache dir
-//   QWEN_REFRESH_ON_429    set to "0" to disable auto-rotate on RateLimited
+// server.js — tiny HTTP front for the compiled Qwen class. Main process
+// for a Docker container.
 //
 // Endpoints:
-//   GET    /healthz                           — liveness + session metadata
-//   POST   /v1/chat/completions               — OpenAI-ish, single turn
-//   POST   /v1/conversations                  — create a server-side conversation
-//   POST   /v1/conversations/:id/messages     — send one turn (stateful)
-//   DELETE /v1/conversations/:id              — drop from memory
+//   GET    /healthz
+//   POST   /v1/chat/completions              (stateless, OpenAI-ish)
+//   POST   /v1/conversations                  (create a server-side chat)
+//   POST   /v1/conversations/:id/messages     (send a turn)
+//   DELETE /v1/conversations/:id              (drop from memory)
 'use strict';
 
 const http = require('node:http');
 const crypto = require('node:crypto');
-const qwen = require('./src');
+const Qwen = require('./dist');  // main = dist/index.js
 
 const PORT = parseInt(process.env.PORT || '8787', 10);
 const REFRESH_ON_429 = process.env.QWEN_REFRESH_ON_429 !== '0';
 
-// In-process conversation store. Keep it bounded — a real deployment would
-// push this to Redis / a DB keyed by a per-user session id.
-const conversations = new Map();
-function newConvId() { return crypto.randomUUID(); }
+// In-memory conversation store. Replace with Redis/DB in production.
+const chats = new Map();
+function newId() { return crypto.randomUUID(); }
 
-// ---- request helpers ----
 function readJson(req) {
   return new Promise((resolve, reject) => {
     let body = '';
     req.on('data', (c) => { body += c; });
     req.on('end', () => {
       try { resolve(body ? JSON.parse(body) : {}); }
-      catch (_) { reject(new Error('invalid JSON body')); }
+      catch { reject(new Error('invalid JSON body')); }
     });
     req.on('error', reject);
   });
@@ -59,36 +52,50 @@ function writeSseEvent(res, obj) {
   res.write('data: ' + JSON.stringify(obj) + '\n\n');
 }
 
-// ---- route dispatcher ----
+function errorToStatus(e) {
+  if (e instanceof Qwen.QwenRateLimitedError) return 429;
+  if (e instanceof Qwen.QwenUnauthorizedError) return 401;
+  if (e instanceof Qwen.QwenBadRequestError) return 400;
+  if (e instanceof Qwen.QwenNetworkError) return 502;
+  return 500;
+}
+function errorToJson(e) {
+  return {
+    error: e.message,
+    code: e.code || null,
+    retryAfterHours: e.retryAfterHours || null,
+  };
+}
+
 async function handle(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const method = req.method || 'GET';
 
-  // CORS — this server is intended to run behind a gateway; the gateway
-  // should enforce auth and tighten CORS. We leave everything open here.
+  // Permissive CORS — run behind a gateway that enforces auth.
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
-  // GET /healthz
+  // ── GET /healthz ──
   if (method === 'GET' && url.pathname === '/healthz') {
     try {
-      const s = await qwen.getSession();
+      const sess = await Qwen.warmup();
       return writeJson(res, 200, {
         ok: true,
         session: {
-          createdAt: s.createdAt,
-          ageSeconds: Math.round((Date.now() - s.createdAt) / 1000),
+          createdAt: sess.createdAt,
+          expiresInSeconds: Math.round(sess.expiresIn / 1000),
         },
-        conversations: conversations.size,
+        chats: chats.size,
+        models: Qwen.models,
       });
     } catch (e) {
       return writeJson(res, 500, { ok: false, error: e.message });
     }
   }
 
-  // POST /v1/chat/completions  — stateless, OpenAI-ish
+  // ── POST /v1/chat/completions (stateless, like OpenAI) ──
   if (method === 'POST' && url.pathname === '/v1/chat/completions') {
     let body;
     try { body = await readJson(req); }
@@ -96,7 +103,7 @@ async function handle(req, res) {
 
     const {
       messages = [],
-      model = qwen.DEFAULT_MODEL,
+      model,
       system = null,
       stream = false,
       chat_mode = 'normal',
@@ -108,115 +115,154 @@ async function handle(req, res) {
       return writeJson(res, 400, { error: 'messages array required' });
     }
 
+    // Collapse messages[] into a single system+user pair — Qwen's
+    // one-message-per-turn API doesn't accept OpenAI history natively.
+    const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+    if (!lastUser) return writeJson(res, 400, { error: 'no user message' });
+    const transcript = messages
+      .slice(0, -1)
+      .map((m) => `${m.role}: ${m.content}`)
+      .join('\n');
+    const effectiveSystem = [system, transcript].filter(Boolean).join('\n\n') || null;
+
     try {
+      const qwen = new Qwen({
+        model,
+        system: effectiveSystem,
+        stream,
+        chatMode: chat_mode,
+        chatType: chat_type,
+        thinking,
+      });
+
       if (stream) {
         writeSseStart(res);
-        let reply = '';
-        for await (const ev of qwen.stream(messages, {
-          model, system, chatType: chat_type, chatMode: chat_mode, thinkingEnabled: thinking,
-        })) {
-          if (ev.type === 'delta') {
-            reply = ev.fullContent;
+        for await (const ev of qwen.ask(lastUser.content)) {
+          if (ev.type === 'text') {
             writeSseEvent(res, { delta: ev.content, fullContent: ev.fullContent });
           }
+          if (ev.type === 'done') {
+            writeSseEvent(res, { done: true, reply: ev.reply, usage: qwen.usage });
+          }
         }
-        writeSseEvent(res, { done: true, reply });
         res.end();
         return;
       }
-      const reply = await qwen(messages, {
-        model, system, chatType: chat_type, chatMode: chat_mode, thinkingEnabled: thinking,
+
+      const { reply } = await qwen.ask(lastUser.content);
+      return writeJson(res, 200, {
+        model: qwen.options.model || Qwen.DEFAULT_MODEL,
+        reply,
+        usage: qwen.usage,
       });
-      return writeJson(res, 200, { model, reply });
     } catch (e) {
-      if (REFRESH_ON_429 && e.code === 'RateLimited') {
+      if (REFRESH_ON_429 && e instanceof Qwen.QwenRateLimitedError) {
         try {
-          await qwen.warmup({ forceRefresh: true });
-          const reply = await qwen(messages, {
-            model, system, chatType: chat_type, chatMode: chat_mode, thinkingEnabled: thinking,
+          await Qwen.warmup({ forceRefresh: true });
+          const qwen = new Qwen({
+            model, system: effectiveSystem, chatMode: chat_mode,
+            chatType: chat_type, thinking,
           });
-          return writeJson(res, 200, { model, reply, rotated: true });
+          const { reply } = await qwen.ask(lastUser.content);
+          return writeJson(res, 200, { reply, usage: qwen.usage, rotated: true });
         } catch (e2) {
-          return writeJson(res, 429, {
-            error: e2.message, code: e2.code || 'RateLimited', retryAfterHours: e2.retryAfterHours,
-          });
+          return writeJson(res, errorToStatus(e2), errorToJson(e2));
         }
       }
-      return writeJson(res, 500, {
-        error: e.message, code: e.code, retryAfterHours: e.retryAfterHours,
-      });
+      return writeJson(res, errorToStatus(e), errorToJson(e));
     }
   }
 
-  // POST /v1/conversations — create a new server-side conversation handle
+  // ── POST /v1/conversations ──
   if (method === 'POST' && url.pathname === '/v1/conversations') {
     let body;
     try { body = await readJson(req); }
     catch (e) { return writeJson(res, 400, { error: e.message }); }
     try {
-      const conv = await qwen.conversation({
+      const qwen = new Qwen({
         model: body.model,
         system: body.system || null,
         chatMode: body.chat_mode || 'normal',
         chatType: body.chat_type || 't2t',
         thinking: !!body.thinking,
       });
-      const id = newConvId();
-      conversations.set(id, { conv, createdAt: Date.now() });
-      return writeJson(res, 201, { id, chatId: conv.chatId, model: conv.model });
+      // Force eager chat creation so we have a chatId immediately
+      const id = newId();
+      chats.set(id, { qwen, createdAt: Date.now() });
+      return writeJson(res, 201, { id, model: qwen.options.model || Qwen.DEFAULT_MODEL });
     } catch (e) {
-      return writeJson(res, 500, { error: e.message });
+      return writeJson(res, errorToStatus(e), errorToJson(e));
     }
   }
 
-  // POST /v1/conversations/:id/messages — send one turn
+  // ── POST /v1/conversations/:id/messages ──
   const sendMatch = url.pathname.match(/^\/v1\/conversations\/([^/]+)\/messages$/);
   if (method === 'POST' && sendMatch) {
     const id = sendMatch[1];
-    const entry = conversations.get(id);
+    const entry = chats.get(id);
     if (!entry) return writeJson(res, 404, { error: 'conversation not found' });
     let body;
     try { body = await readJson(req); }
     catch (e) { return writeJson(res, 400, { error: e.message }); }
-    const { content, stream = false } = body;
+    const { content, stream = false, method: turnMethod = 'ask' } = body;
     if (!content) return writeJson(res, 400, { error: 'content required' });
+    if (!['ask', 'search', 'image', 'think'].includes(turnMethod)) {
+      return writeJson(res, 400, { error: 'method must be ask|search|image|think' });
+    }
+
     try {
+      // Since the server-side chat was created without `stream`, we
+      // always use the promise form here. Streaming responses are served
+      // by wrapping the promise's internal iterator manually.
+      const qwen = entry.qwen;
       if (stream) {
-        writeSseStart(res);
-        const r = await entry.conv.send(content, {
-          onDelta: (d) => writeSseEvent(res, { delta: d.content, fullContent: d.fullContent }),
+        // Create a stream-capable wrapper over the same chat_id
+        const streamer = new Qwen({
+          ...qwen.options,
+          stream: true,
+          chatId: qwen.chatId,
+          lastResponseId: qwen.lastResponseId,
         });
-        writeSseEvent(res, { done: true, reply: r.reply, turn: r.turn, usage: r.usage });
+        writeSseStart(res);
+        for await (const ev of streamer[turnMethod](content)) {
+          if (ev.type === 'text') writeSseEvent(res, { delta: ev.content, fullContent: ev.fullContent });
+          if (ev.type === 'thinking') writeSseEvent(res, { thinking: ev.content });
+          if (ev.type === 'sources') writeSseEvent(res, { sources: ev.sources });
+          if (ev.type === 'image') writeSseEvent(res, { image: { url: ev.url, width: ev.width, height: ev.height } });
+          if (ev.type === 'done') writeSseEvent(res, { done: true, reply: ev.reply, usage: streamer.usage });
+        }
+        // Write state back to the stored chat
+        qwen.chatId = streamer.chatId;
+        qwen.lastResponseId = streamer.lastResponseId;
+        qwen.usage = streamer.usage;
+        qwen.history = streamer.history;
         res.end();
         return;
       }
-      const r = await entry.conv.send(content);
-      return writeJson(res, 200, {
-        reply: r.reply, turn: r.turn, usage: r.usage, thinking: r.thinking, toolEvents: r.toolEvents,
-      });
+
+      const result = await qwen[turnMethod](content);
+      return writeJson(res, 200, { ...result, usage: qwen.usage });
     } catch (e) {
-      return writeJson(res, e.code === 'RateLimited' ? 429 : 500, {
-        error: e.message, code: e.code, retryAfterHours: e.retryAfterHours,
-      });
+      return writeJson(res, errorToStatus(e), errorToJson(e));
     }
   }
 
-  // DELETE /v1/conversations/:id
+  // ── DELETE /v1/conversations/:id ──
   const delMatch = url.pathname.match(/^\/v1\/conversations\/([^/]+)$/);
   if (method === 'DELETE' && delMatch) {
-    conversations.delete(delMatch[1]);
+    chats.delete(delMatch[1]);
     return writeJson(res, 200, { ok: true });
   }
 
   writeJson(res, 404, { error: 'not found' });
 }
 
-// ---- boot ----
+// ──── boot ────
 (async () => {
   console.log(`[qwen-server] booting pid=${process.pid}`);
   const t0 = Date.now();
   try {
-    const w = await qwen.warmup();
+    const w = await Qwen.warmup();
     console.log(
       `[qwen-server] warmup OK in ${Date.now() - t0}ms, ` +
       `session expires in ${Math.round(w.expiresIn / 1000)}s`
@@ -228,16 +274,15 @@ async function handle(req, res) {
   const server = http.createServer((req, res) => {
     handle(req, res).catch((e) => {
       console.error('[qwen-server] handler error:', e);
-      try { writeJson(res, 500, { error: e.message }); } catch (_) {}
+      try { writeJson(res, 500, { error: e.message }); } catch {}
     });
   });
   server.listen(PORT, () => {
     console.log(`[qwen-server] listening on http://0.0.0.0:${PORT}`);
-    console.log('[qwen-server] endpoints:');
     console.log('  GET    /healthz');
     console.log('  POST   /v1/chat/completions   { messages, stream?, model?, system?, chat_type? }');
     console.log('  POST   /v1/conversations      { model?, system?, chat_type?, ... }');
-    console.log('  POST   /v1/conversations/:id/messages  { content, stream? }');
+    console.log('  POST   /v1/conversations/:id/messages  { content, stream?, method: ask|search|image|think }');
     console.log('  DELETE /v1/conversations/:id');
   });
 

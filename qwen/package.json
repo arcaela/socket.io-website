@@ -1,22 +1,38 @@
 {
   "name": "qwen-node",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Browser-free Qwen (chat.qwen.ai) guest client with OpenAI-style API, self-contained bundle, and HTTP server — ready to drop into a Docker/K8s container.",
-  "main": "src/index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
     "qwen-server": "./server.js"
   },
   "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "rebuild": "npm run clean && npm run build",
     "start": "node server.js",
-    "warmup": "node -e \"require('./src').warmup({forceRefresh:true}).then(s => console.log(JSON.stringify(s, null, 2)))\"",
-    "build": "node build-bundle.js"
+    "warmup": "node -e \"require('./dist').warmup({forceRefresh:true}).then(s => console.log(JSON.stringify(s, null, 2)))\"",
+    "bundle": "node build-bundle.js"
   },
   "dependencies": {
     "jsdom": "^22.0.0",
     "undici": "^6.0.0"
   },
+  "devDependencies": {
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^22.19.17",
+    "typescript": "^5.9.3"
+  },
   "engines": {
     "node": ">=22.0.0"
   },
+  "files": [
+    "dist/",
+    "src/",
+    "server.js",
+    "build-bundle.js",
+    "README.md"
+  ],
   "private": true
 }

@@ -1,55 +1,60 @@
-// src/lib/awsc-scripts.js
-// Provides the three AWSC script bodies (awsc.js, collina.js, um.js) to the
-// jsdom setup. Three sources, tried in order:
+// src/lib/awsc-scripts.ts
+// Provides the three AWSC script bodies (awsc.js, collina.js, um.js) from
+// one of three sources, tried in order:
 //
-//   1. An inline `EMBEDDED_AWSC` constant that ships gzipped+base64 versions
-//      of all three scripts. This is what `build-bundle.js` injects into
-//      `dist/qwen-bundle.js` to produce a fully self-contained single file.
+//   1. An inline `EMBEDDED_AWSC` constant that `build-bundle.js` injects
+//      at bundling time (gzip+base64 of all three scripts).
 //   2. `<cache-dir>/awsc/*.js` on disk (from a previous run).
-//   3. Synchronous download via curl/wget, with a Node subprocess fallback.
-//
-// The sync download is necessary because the jsdom setup MUST happen at
-// require-time of src/index.js (see README for why), and CommonJS does not
-// support top-level await.
-'use strict';
+//   3. Synchronous download via curl / wget / Node subprocess.
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as zlib from 'node:zlib';
+import { spawnSync } from 'node:child_process';
 
-const fs = require('node:fs');
-const path = require('node:path');
-const zlib = require('node:zlib');
-const { spawnSync } = require('node:child_process');
+import { AWSC_DIR, AWSC_URLS, USER_AGENT } from './constants';
 
-const { AWSC_DIR, AWSC_URLS, USER_AGENT } = require('./constants');
+export interface AwscScripts {
+  awsc: string;
+  collina: string;
+  um: string;
+}
 
 // Replaced by build-bundle.js at bundling time. Shape:
 //   { awsc: '<base64-gzip>', collina: '<base64-gzip>', um: '<base64-gzip>' }
-const EMBEDDED_AWSC = null;
+const EMBEDDED_AWSC: Record<string, string> | null = null;
 
-function ensureDir(p) { fs.mkdirSync(p, { recursive: true }); }
-
-function readEmbedded() {
-  if (!EMBEDDED_AWSC) return null;
-  try {
-    const out = {};
-    for (const [k, b64] of Object.entries(EMBEDDED_AWSC)) {
-      out[k] = zlib.gunzipSync(Buffer.from(b64, 'base64')).toString('utf8');
-    }
-    return out;
-  } catch (_) { return null; }
+function ensureDir(p: string): void {
+  fs.mkdirSync(p, { recursive: true });
 }
 
-function readDiskCache() {
+export function readEmbedded(): AwscScripts | null {
+  if (!EMBEDDED_AWSC) return null;
   try {
-    const out = {};
-    for (const name of ['awsc', 'collina', 'um']) {
+    const out: Partial<AwscScripts> = {};
+    for (const [k, b64] of Object.entries(EMBEDDED_AWSC)) {
+      (out as any)[k] = zlib.gunzipSync(Buffer.from(b64, 'base64')).toString('utf8');
+    }
+    return out as AwscScripts;
+  } catch {
+    return null;
+  }
+}
+
+export function readDiskCache(): AwscScripts | null {
+  try {
+    const out: Partial<AwscScripts> = {};
+    for (const name of ['awsc', 'collina', 'um'] as const) {
       const f = path.join(AWSC_DIR, `${name}.js`);
       if (!fs.existsSync(f) || fs.statSync(f).size < 1000) return null;
       out[name] = fs.readFileSync(f, 'utf8');
     }
-    return out;
-  } catch (_) { return null; }
+    return out as AwscScripts;
+  } catch {
+    return null;
+  }
 }
 
-function downloadSync() {
+export function downloadSync(): AwscScripts | null {
   ensureDir(AWSC_DIR);
   const proxy =
     process.env.HTTPS_PROXY || process.env.https_proxy ||
@@ -69,7 +74,7 @@ function downloadSync() {
       if (r.status === 0 && fs.existsSync(file) && fs.statSync(file).size > 1000) continue;
     }
     if (wgetOK) {
-      const env = { ...process.env };
+      const env = { ...process.env } as NodeJS.ProcessEnv;
       if (proxy) env.https_proxy = proxy;
       const r = spawnSync(
         'wget',
@@ -79,8 +84,7 @@ function downloadSync() {
       if (r.status === 0 && fs.existsSync(file) && fs.statSync(file).size > 1000) continue;
     }
 
-    // Last resort: spawn a Node subprocess that uses undici to download.
-    // Guarantees the HTTPS_PROXY handling matches our own.
+    // Last resort: spawn a Node subprocess using undici
     const code = `
       (async () => {
         const fs = require('node:fs');
@@ -112,10 +116,6 @@ function downloadSync() {
   return readDiskCache();
 }
 
-// Resolve AWSC scripts from whichever source is available. Throws only if
-// none of them work (e.g. first run in an offline container with no bundle).
-function getAwscScripts() {
+export function getAwscScripts(): AwscScripts | null {
   return readEmbedded() || readDiskCache() || downloadSync();
 }
-
-module.exports = { getAwscScripts, readEmbedded, readDiskCache, downloadSync };
