@@ -28,6 +28,7 @@ const { loadCachedSession, makeGetSession } = require('./lib/session');
 const { createChat, streamChatCompletion } = require('./lib/http');
 const { flattenMessages } = require('./lib/messages');
 const { makeConversation } = require('./lib/conversation');
+const { makeHelpers } = require('./lib/helpers');
 
 // 2) Lazy jsdom env — built at most once per process. We expose this via a
 //    closure so session.js can request it only when it actually needs to
@@ -65,6 +66,7 @@ function ensureJsdomEnv() {
 // 4) Build the high-level helpers that depend on the jsdom env.
 const getSession = makeGetSession({ ensureJsdomEnv });
 const conversation = makeConversation({ getSession });
+const helpers = makeHelpers({ conversation });
 
 // 5) The callable default export.
 async function qwen(messages, options = {}) {
@@ -148,6 +150,22 @@ qwen.warmup = async function ({ forceRefresh = false } = {}) {
   };
 };
 
+// -------- High-level helpers (the practical API) --------
+//
+//   qwen.ask(prompt, opts?)           → string
+//   qwen.search(query, opts?)         → { reply, sources, usage }
+//   qwen.image(prompt, opts?)         → { url, width, height, model }
+//   qwen.think(prompt, opts?)         → { reply, thinking, usage }
+//   qwen.chat(opts?)                  → stateful multi-turn handle
+//
+// See src/lib/helpers.js for the full signatures.
+qwen.ask = helpers.ask;
+qwen.search = helpers.search;
+qwen.image = helpers.image;
+qwen.think = helpers.think;
+qwen.chat = helpers.chat;
+
+// -------- Lower-level API (still exposed) --------
 qwen.conversation = conversation;
 qwen.getSession = getSession;
 qwen.DEFAULT_MODEL = DEFAULT_MODEL;

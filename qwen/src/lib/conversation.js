@@ -137,9 +137,10 @@ function makeConversation({ getSession }) {
           if (!choice || !choice.delta) continue;
           const delta = choice.delta;
           if (payload.usage) usage = payload.usage;
-          if (delta.status === 'finished') continue;
 
-          // Record tool-related events (web_search, image_gen, etc.)
+          // Record tool-related events FIRST (some of them arrive with
+          // `status: "finished"`, which would be skipped by the early
+          // continue below — notably the web_search tool_result event).
           if (delta.function_call || (delta.extra && delta.extra.tool_result)) {
             toolEvents.push({
               phase: delta.phase,
@@ -149,6 +150,10 @@ function makeConversation({ getSession }) {
               extra: delta.extra,
             });
           }
+
+          // The terminal `phase: "answer", status: "finished"` event never
+          // carries content — skip it so we don't re-emit empty deltas.
+          if (delta.status === 'finished') continue;
 
           if (typeof delta.content === 'string' && delta.content.length) {
             if (delta.phase === 'think') thinkingText += delta.content;

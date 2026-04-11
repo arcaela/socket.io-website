@@ -179,6 +179,23 @@ async function* streamChatCompletion(session, chatId, prompt, {
       if (!choice || !choice.delta) continue;
       const delta = choice.delta;
 
+      // Tool-call / tool-result event. We emit these FIRST because the
+      // tool_result frame arrives with `status: "finished"` and we must
+      // not swallow it as the turn's terminal event below.
+      if (delta.function_call || (delta.extra && delta.extra.tool_result)) {
+        yield {
+          type: 'tool',
+          phase: delta.phase,
+          role: delta.role,
+          functionCall: delta.function_call,
+          functionId: delta.function_id,
+          name: delta.name,
+          extra: delta.extra,
+        };
+        // Tool results usually carry no text content, but don't `continue`
+        // just in case future frames combine both. Fall through.
+      }
+
       if (delta.status === 'finished') {
         yield { type: 'finished', fullContent, responseId: payload.response_id || responseId };
         continue;
@@ -196,22 +213,6 @@ async function* streamChatCompletion(session, chatId, prompt, {
           usage: payload.usage,
           functionCall: delta.function_call,
           functionId: delta.function_id,
-          extra: delta.extra,
-        };
-        continue;
-      }
-
-      // Tool-call / tool-result event without text content. Happens during
-      // the web_search/image_gen/code_interpreter phases. We surface the raw
-      // payload so callers can harvest citations, tool arguments, etc.
-      if (delta.function_call || (delta.extra && delta.extra.tool_result)) {
-        yield {
-          type: 'tool',
-          phase: delta.phase,
-          role: delta.role,
-          functionCall: delta.function_call,
-          functionId: delta.function_id,
-          name: delta.name,
           extra: delta.extra,
         };
       }
