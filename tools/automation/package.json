@@ -1,0 +1,14 @@
+{
+  "name": "socketio-website-automation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Headless GUI web automation tools (Playwright + Xvfb) for use in sandboxed dev environments.",
+  "scripts": {
+    "postinstall": "playwright install --with-deps chromium",
+    "deepseek": "DISPLAY=${DISPLAY:-:99} node deepseek.js",
+    "deepseek:headless": "HEADLESS=1 node deepseek.js"
+  },
+  "dependencies": {
+    "playwright": "^1.59.1"
+  }
+}
