@@ -35,7 +35,7 @@ const Qwen = require('..');
       }
       process.stdout.write(ev.content);
     } else if (ev.type === 'done') {
-      console.log('\n\n[done]', chat.usage.tokens, 'total tokens');
+      console.log('\n\n[done]', chat.usage.tokens.total, 'total tokens');
     }
   }
 })().catch((e) => {

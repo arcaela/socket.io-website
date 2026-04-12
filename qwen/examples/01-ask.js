@@ -22,7 +22,7 @@ const Qwen = require('..');  // resolves to dist/index.js via package.json main
   process.stdout.write('chunks: ');
   for await (const ev of streaming.ask('Contá del 1 al 5 separados por guiones.')) {
     if (ev.type === 'text') process.stdout.write(ev.content);
-    if (ev.type === 'done') console.log(`\n[done] usage=${streaming.usage.tokens}t`);
+    if (ev.type === 'done') console.log(`\n[done] usage=${streaming.usage.tokens.total}t rounds=${streaming.usage.rounds}`);
   }
 
   // ── Typed error handling (same exceptions for both forms) ──

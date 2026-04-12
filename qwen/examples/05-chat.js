@@ -33,9 +33,10 @@ const Qwen = require('..');
   r = await chat.ask('En una frase, resumí lo que hablamos.');
   console.log(`\n[turn ${r.turn}] ask → ${r.reply}`);
 
-  console.log(`\ntotal turns: ${chat.usage.requests}`);
-  console.log(`tokens: ${chat.usage.tokens} (in=${chat.usage.input}, out=${chat.usage.output})`);
+  console.log(`\ntotal rounds: ${chat.usage.rounds}`);
+  console.log(`tokens: ${chat.usage.tokens.total} (in=${chat.usage.tokens.input}, out=${chat.usage.tokens.output})`);
   console.log(`history entries: ${chat.history.length}`);
+  console.log(`known models (chat.models): ${chat.models.join(', ')}`);
 })().catch((e) => {
   if (e instanceof Qwen.QwenRateLimitedError) {
     console.error(`rate limited — retry in ${e.retryAfterHours}h`);

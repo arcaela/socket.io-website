@@ -24,9 +24,10 @@ const { reply, sources }     = await chat.search('clima en Madrid');            
 const { url, width, height } = await chat.image('un paisaje futurista');        // this turn → image gen
 const { reply, thinking }    = await chat.think('diseñá una SPA paso a paso');  // this turn → thinking
 
-chat.usage      // { input, output, tokens, requests }  — accumulated across turns
+chat.usage      // { tokens: { input, output, total }, rounds }  — accumulated
 chat.chatId     // server-side chat identifier
 chat.history    // local transcript
+chat.models     // list of known Qwen models (same as Qwen.models)
 
 // ── Stream mode: construct once, every method becomes an async iterator ──
 const streamChat = new Qwen({ stream: true, system: 'Brief.' });
@@ -36,17 +37,10 @@ for await (const ev of streamChat.ask('count to 5')) {
 }
 
 // ── Session recovery: export state, resume later ──
-const snapshot = await chat.exportSession();
-// ... persist snapshot somewhere (Redis, DB, file, ...) ...
-const resumed = new Qwen({
-  ...snapshot.options,
-  chatId:         snapshot.chatId,
-  lastResponseId: snapshot.lastResponseId,
-  history:        snapshot.history,
-  usage:          snapshot.usage,
-  session:        snapshot.session,
-});
-await resumed.ask('continuación'); // remembers everything
+const exported = await chat.export();
+// ... persist `exported` somewhere (Redis, DB, file, ...) ...
+const resumed = new Qwen(exported);   // no spread needed — it IS the options
+await resumed.ask('continuación');    // remembers everything
 ```
 
 Full runnable examples live under [`examples/`](./examples/).
@@ -121,22 +115,25 @@ Every method returns either a `Promise<Result>` (default) or an `AsyncGenerator<
 ### Instance state
 
 ```ts
-chat.chatId           // string — server-side conversation id
+chat.chatId            // string — server-side conversation id (or null until first turn)
 chat.lastResponseId    // string — last turn's response_id (parent_id chain)
-chat.usage             // { input, output, tokens, requests }
+chat.usage             // { tokens: { input, output, total }, rounds }
 chat.history           // [{role, content, thinking?}, ...]
 chat.options           // (frozen) QwenOptions passed to the constructor
 chat.stream            // boolean — whichever `stream` was set
+chat.models            // readonly QwenModel[] — known models (same as Qwen.models)
 ```
 
 ### Persistence
 
 ```ts
-chat.toJSON()                  // synchronous snapshot (no session credentials)
-await chat.exportSession()     // full snapshot WITH session credentials
+const exported = await chat.export();    // flat QwenOptions-compatible blob
+// ... persist `exported` somewhere (JSON.stringify is safe) ...
+const resumed = new Qwen(exported);       // no spread — `exported` IS the options
+await resumed.ask('continuación');        // backend remembers everything
 ```
 
-Pass a snapshot back to `new Qwen({ ...snapshot })` to resume.
+`chat.export()` returns a **flat** object — the original constructor options merged with the runtime state (`chatId`, `lastResponseId`, `history`, `usage`, `session`). This object is directly assignable to a `new Qwen(...)` constructor call, so there's no destructuring required.
 
 ### Static methods
 

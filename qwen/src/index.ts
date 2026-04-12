@@ -65,7 +65,7 @@ import {
 import type {
   QwenOptions,
   QwenUsage,
-  QwenState,
+  QwenExport,
   QwenModel,
   ChatType,
   ChatMode,
@@ -97,12 +97,21 @@ function ensureJsdomEnv(): JsdomEnv {
   return _jsdomEnv;
 }
 
-// Skip the jsdom setup at require-time if we have a valid session cached.
-// This is the hot path for warm starts (~400ms instead of ~10s).
+// Always initialize the jsdom env at require-time, even if a valid cached
+// session exists. Why: AWSC's `collina.js` and `um.js` schedule internal
+// setTimeout chains at eval time. If we defer the eval until the first
+// async code runs (e.g. `Qwen.warmup({ forceRefresh: true })` after a rate
+// limit), those chains silently fail and um.init() never triggers its
+// XHR. Eval-at-module-top is the workaround, documented in README as
+// "the ordering quirk". Pay the ~1s cost on startup to avoid mysterious
+// failures on session rotation later.
+//
+// Set QWEN_SKIP_JSDOM_INIT=1 if you know your process never rotates the
+// session and want a faster cold start (e.g. short-lived scripts).
 (function initAtRequireTime() {
-  try {
-    if (loadCachedSession()) return;
-  } catch {}
+  if (process.env.QWEN_SKIP_JSDOM_INIT === '1') {
+    try { if (loadCachedSession()) return; } catch {}
+  }
   try {
     ensureJsdomEnv();
   } catch (e: any) {
@@ -250,11 +259,21 @@ export default class Qwen {
     this.lastResponseId = opts.lastResponseId ?? null;
     this.history = opts.history ? opts.history.slice() : [];
     this.usage = opts.usage
-      ? { ...opts.usage }
-      : { input: 0, output: 0, tokens: 0, requests: 0 };
+      ? {
+          tokens: {
+            input: opts.usage.tokens?.input || 0,
+            output: opts.usage.tokens?.output || 0,
+            total: opts.usage.tokens?.total || 0,
+          },
+          rounds: opts.usage.rounds || 0,
+        }
+      : {
+          tokens: { input: 0, output: 0, total: 0 },
+          rounds: 0,
+        };
 
     // If the caller supplied an existing session (from a previous
-    // chat.exportSession()), inject it into the on-disk cache so the
+    // chat.export()), inject it into the on-disk cache so the
     // next getSession() picks it up. The cache is also consulted for
     // automatic token rotation.
     if (opts.session) {
@@ -262,6 +281,11 @@ export default class Qwen {
         injectSession(opts.session);
       } catch {}
     }
+  }
+
+  /** Known Qwen models accepted by the guest endpoint. */
+  get models(): readonly QwenModel[] {
+    return KNOWN_MODELS;
   }
 
   // ---- lazy conversation creation ----
@@ -287,14 +311,14 @@ export default class Qwen {
   }
 
   // ---- usage accumulator ----
-  private _accumulateUsage(usage: TurnUsage | null): void {
-    if (!usage) return;
-    const input = usage.input_tokens || 0;
-    const output = usage.output_tokens || 0;
-    this.usage.input += input;
-    this.usage.output += output;
-    this.usage.tokens += input + output;
-    this.usage.requests += 1;
+  private _accumulateUsage(u: TurnUsage | null): void {
+    if (!u) return;
+    const input = u.input_tokens || 0;
+    const output = u.output_tokens || 0;
+    this.usage.tokens.input += input;
+    this.usage.tokens.output += output;
+    this.usage.tokens.total += input + output;
+    this.usage.rounds += 1;
   }
 
   // ---- one send — Promise form ----
@@ -406,37 +430,50 @@ export default class Qwen {
   }
 
   // =========================================================================
-  // Session export / import
+  // Persistence
   // =========================================================================
 
   /**
-   * Snapshot the full chat state for persistence. Pass this back to a new
-   * `Qwen(...)` constructor to resume the conversation later.
+   * Export the full state of this chat as a flat `QwenOptions` blob you
+   * can pass directly back to `new Qwen(...)` to resume the conversation
+   * from where it left off.
+   *
+   *   const exported = await chat.export();
+   *   // persist `exported` (JSON.stringify-safe) to Redis / DB / disk
+   *   const resumed  = new Qwen(exported);
+   *   await resumed.ask('continuación');   // sees all prior turns
+   *
+   * The returned object includes:
+   *   - the original constructor options (model, system, stream, chatType, ...)
+   *   - server-side identifiers (chatId, lastResponseId)
+   *   - local transcript (history)
+   *   - accumulated usage counters
+   *   - the live session credentials (cookie + bx-ua + bx-umidtoken)
+   *
+   * Session credentials expire after ~25 minutes; if the exported blob is
+   * older than that, recovery will fail with `QwenUnauthorizedError` or
+   * `QwenBadRequestError` and you should fall back to creating a new chat.
    */
-  toJSON(): QwenState {
-    return {
-      chatId: this.chatId,
-      lastResponseId: this.lastResponseId,
-      usage: { ...this.usage },
-      history: this.history.slice(),
-      options: { ...this.options },
-      session: null, // callers who need the session credentials call exportSession() explicitly
-    };
-  }
-
-  /**
-   * Export the live session credentials alongside the chat state. Useful
-   * if you want to persist a resumable chat across process restarts within
-   * the session TTL (25 minutes).
-   */
-  async exportSession(): Promise<QwenState> {
-    const state = this.toJSON();
+  async export(): Promise<QwenExport> {
+    let session: SavedSession | undefined;
     try {
-      state.session = await getSession();
+      session = await getSession();
     } catch {
-      state.session = null;
+      session = undefined;
     }
-    return state;
+    return {
+      // original constructor options
+      ...this.options,
+      // runtime state
+      chatId: this.chatId || undefined,
+      lastResponseId: this.lastResponseId || undefined,
+      history: this.history.slice(),
+      usage: {
+        tokens: { ...this.usage.tokens },
+        rounds: this.usage.rounds,
+      },
+      session,
+    };
   }
 }
 
@@ -460,7 +497,7 @@ module.exports.QwenNetworkError = QwenNetworkError;
 export type {
   QwenOptions,
   QwenUsage,
-  QwenState,
+  QwenExport,
   QwenModel,
   ChatType,
   ChatMode,

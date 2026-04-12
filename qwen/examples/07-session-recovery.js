@@ -1,17 +1,13 @@
 // examples/07-session-recovery.js — persist a chat and resume it later.
 //
-// Use case: user closes the tab, your service needs to rehydrate the
-// same Qwen conversation (with memory) on the next request, possibly
-// from a different process entirely.
+// Use case: a web service receives a user message, needs to continue an
+// existing conversation across process restarts or load-balanced workers.
 //
-// Snapshot your chat with `await chat.exportSession()`, persist it
-// (Redis, DB, disk), and later pass the snapshot to `new Qwen(...)`.
-// Caveats:
-//   - The backend chat_id only stays valid as long as the underlying
-//     session credentials do (~25 minutes for the acw_tc cookie).
-//   - If the session is too old, pass `session: null` in the recovery
-//     options and the library will mint a fresh one (but Qwen will
-//     reject old chat_ids — you'll get a Bad_Request).
+//   chat.export()       → returns a flat QwenOptions-compatible blob
+//                         (chatId, lastResponseId, history, usage, session,
+//                          plus the original constructor options)
+//   new Qwen(exported)  → resumes the chat from that blob; the backend
+//                         remembers all prior turns via chat_id + parent_id.
 //
 //   node examples/07-session-recovery.js
 const fs = require('node:fs');
@@ -21,39 +17,37 @@ const Qwen = require('..');
 const STATE_FILE = path.join(__dirname, 'session-state.json');
 
 (async () => {
-  // ── Session 1: create a chat, say a couple of things, export state ──
+  // ── Session 1: create a chat, say a couple of things, export ──
   console.log('--- Session 1: create + export ---');
   const chat1 = new Qwen({ system: 'Sé muy breve.' });
   await chat1.ask('Mi color favorito es azul.');
   await chat1.ask('Mi animal favorito es el lobo.');
 
-  const state = await chat1.exportSession();
+  const exported = await chat1.export();
   console.log('exported:');
-  console.log('  chatId:     ', state.chatId);
-  console.log('  history:    ', state.history.length, 'entries');
-  console.log('  usage:      ', state.usage);
-  console.log('  session age:', Math.round((Date.now() - state.session.createdAt) / 1000), 's');
+  console.log('  chatId:        ', exported.chatId);
+  console.log('  history:       ', exported.history.length, 'entries');
+  console.log('  usage.tokens:  ', exported.usage.tokens);
+  console.log('  usage.rounds:  ', exported.usage.rounds);
+  if (exported.session) {
+    console.log('  session age:   ', Math.round((Date.now() - exported.session.createdAt) / 1000), 's');
+  }
 
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  fs.writeFileSync(STATE_FILE, JSON.stringify(exported, null, 2));
   console.log(`saved to ${STATE_FILE}`);
 
-  // ── Session 2: simulate a restart by reading from disk ──
-  console.log('\n--- Session 2: recover from disk ---');
+  // ── Session 2: simulate a restart, load from disk, hand to new Qwen() ──
+  console.log('\n--- Session 2: recover ---');
   const saved = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-  const chat2 = new Qwen({
-    ...saved.options,
-    chatId: saved.chatId,
-    lastResponseId: saved.lastResponseId,
-    history: saved.history,
-    usage: saved.usage,
-    session: saved.session,
-  });
+
+  // Direct use — no spread, no destructuring. `saved` IS the options blob.
+  const chat2 = new Qwen(saved);
   console.log('chat2 resumed with:');
   console.log('  chatId:        ', chat2.chatId);
   console.log('  history:       ', chat2.history.length, 'entries');
-  console.log('  usage.requests:', chat2.usage.requests);
+  console.log('  usage.rounds:  ', chat2.usage.rounds);
 
-  // Memory test — should recall facts from session 1
+  // Memory test — the backend remembers everything from session 1
   const r = await chat2.ask('¿Cuál es mi color favorito y cuál es mi animal favorito?');
   console.log('\nrecall test →', r.reply);
   console.log('usage after:', chat2.usage);

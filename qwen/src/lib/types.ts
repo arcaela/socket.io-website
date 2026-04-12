@@ -213,22 +213,22 @@ export interface Message {
 
 /** Accumulated usage counters kept by a `Qwen` chat instance. */
 export interface QwenUsage {
-  /** Total input tokens consumed across every turn in this chat. */
-  input: number;
-  /** Total output tokens produced across every turn. */
-  output: number;
-  /** Grand total (input + output). */
-  tokens: number;
-  /** Number of turns completed. */
-  requests: number;
+  tokens: {
+    /** Total input tokens consumed across every turn in this chat. */
+    input: number;
+    /** Total output tokens produced across every turn. */
+    output: number;
+    /** Grand total (input + output). */
+    total: number;
+  };
+  /** Number of turns / round-trips completed. */
+  rounds: number;
 }
 
-/** Snapshot of a chat's full state — what `chat.toJSON()` returns. */
-export interface QwenState {
-  chatId: string | null;
-  lastResponseId: string | null;
-  usage: QwenUsage;
-  history: Message[];
-  options: QwenOptions;
-  session: SavedSession | null;
-}
+/**
+ * Flat recovery blob returned by `chat.export()`. It's just a `QwenOptions`
+ * with all the runtime state (chatId, lastResponseId, history, usage,
+ * session) included — so `new Qwen(await chat.export())` resumes the
+ * conversation directly.
+ */
+export type QwenExport = QwenOptions;
