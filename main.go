@@ -101,9 +101,16 @@ Usage:
   mini provider <name>              list that provider's subcommands
   mini provider <name> <sub> [...]  run a provider-specific subcommand
 
+Flags (on 'mini chat'):
+  --provider, -p <name>    override MINI_PROVIDER for this run
+  --model, -m <name>       override MINI_MODEL for this run
+  --yolo                   skip the approval prompt for risky tool calls
+
 Examples:
   mini provider gemini auth                         start Gemini OAuth flow
   mini provider gemini auth-complete "<url-or-code>"  finish Gemini OAuth
+  mini chat -p openai -m gpt-5 "Refactor X"          one-shot, openai
+  mini chat --yolo                                   REPL, auto-approve
 
 Env (neutral):
   MINI_PROVIDER=<name>     pick the provider (default `+defaultProviderName+`)
@@ -240,12 +247,23 @@ func runTools(ctx context.Context, args []string) error {
 // ---------------- chat (one-shot or interactive) ----------------
 
 func runChat(ctx context.Context, args []string) error {
+	// Parse `mini chat [--provider X] [--model Y] [--yolo] [prompt...]`.
+	// Flags must come before the positional prompt; everything after the
+	// last flag is joined as the prompt. Env vars remain the fallback so
+	// `MINI_PROVIDER=openai mini chat hi` still works.
+	chatArgs, flags, err := parseChatFlags(args)
+	if err != nil {
+		return err
+	}
 	prompt := ""
-	if len(args) > 1 {
-		prompt = strings.Join(args[1:], " ")
+	if len(chatArgs) > 1 {
+		prompt = strings.Join(chatArgs[1:], " ")
 	}
 
-	providerName := getEnv("MINI_PROVIDER", defaultProviderName)
+	providerName := flags.Provider
+	if providerName == "" {
+		providerName = getEnv("MINI_PROVIDER", defaultProviderName)
+	}
 	f, ok := provider.GetFactory(providerName)
 	if !ok {
 		return fmt.Errorf("unknown provider %q (registered: %v)", providerName, provider.List())
@@ -260,7 +278,10 @@ func runChat(ctx context.Context, args []string) error {
 		}
 	}()
 
-	model := getEnv("MINI_MODEL", f.DefaultModel)
+	model := flags.Model
+	if model == "" {
+		model = getEnv("MINI_MODEL", f.DefaultModel)
+	}
 	maxSteps := envInt("MINI_MAX_STEPS", 25)
 	maxParallel := envInt("MINI_MAX_PARALLEL", 4)
 
@@ -282,18 +303,23 @@ func runChat(ctx context.Context, args []string) error {
 		CompactThreshold: envInt("MINI_COMPACT_THRESHOLD", 8000),
 	}
 
+	yolo := flags.Yolo || os.Getenv("MINI_YOLO") == "1"
+
 	if prompt != "" {
-		// One-shot: deny risky tools by default (no human in the loop).
-		// User opts in via MINI_YOLO=1.
-		a.Approver = cli.PolicyApproverForOneShot()
+		// One-shot: --yolo (or env) bypasses approval; otherwise strict.
+		if yolo {
+			a.Approver = cli.YoloApprover{}
+		} else {
+			a.Approver = cli.StrictApprover{}
+		}
 		fmt.Printf("[provider=%s  model=%s  tools=%d]\n", prov.Name(), model, len(reg.List()))
 		_, err := a.Run(ctx, nil, prompt, &cliSink{})
 		return err
 	}
 
 	isTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
-	// REPL: prompt the user before risky tools, unless YOLO is set.
-	if os.Getenv("MINI_YOLO") == "1" {
+	// REPL: prompt the user before risky tools, unless --yolo / MINI_YOLO.
+	if yolo {
 		a.Approver = cli.YoloApprover{}
 	} else {
 		a.Approver = cli.NewTerminalApprover(os.Stdin, os.Stdout)
@@ -375,6 +401,94 @@ ENVIRONMENT
 func buildProvider(ctx context.Context) (provider.Provider, error) {
 	name := getEnv("MINI_PROVIDER", defaultProviderName)
 	return provider.New(ctx, name)
+}
+
+// chatFlags collects everything `mini chat` accepts as a CLI flag. We
+// hand-roll the parser instead of using stdlib `flag` because we want flags
+// to interleave with the prompt-as-positional-args without requiring `--`
+// separators ("mini chat --model gpt-5 hi there" should Just Work).
+type chatFlags struct {
+	Provider string
+	Model    string
+	Yolo     bool
+}
+
+// parseChatFlags walks `args` (which still includes the subcommand name as
+// args[0]) and pulls recognised flags out. The first non-flag token starts
+// the prompt; anything after is treated as prompt text verbatim.
+//
+// Accepted forms: --flag=value, --flag value, -f value. Unknown flags are
+// reported as errors so typos like `--moedel` don't get silently treated as
+// the start of the prompt.
+func parseChatFlags(args []string) (rest []string, flags chatFlags, err error) {
+	rest = append(rest, args[0]) // keep the subcommand name in slot 0
+
+	for i := 1; i < len(args); i++ {
+		a := args[i]
+
+		// `--` terminates flags; the rest is prompt.
+		if a == "--" {
+			rest = append(rest, args[i+1:]...)
+			return
+		}
+
+		// Once we see a non-flag token, treat it and everything after as prompt.
+		if !strings.HasPrefix(a, "-") {
+			rest = append(rest, args[i:]...)
+			return
+		}
+
+		key := a
+		var val string
+		hasVal := false
+		if eq := strings.IndexByte(a, '='); eq >= 0 {
+			key = a[:eq]
+			val = a[eq+1:]
+			hasVal = true
+		}
+
+		readVal := func() (string, error) {
+			if hasVal {
+				return val, nil
+			}
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("flag %s expects a value", key)
+			}
+			i++
+			return args[i], nil
+		}
+
+		switch key {
+		case "--provider", "-p":
+			v, err := readVal()
+			if err != nil {
+				return rest, flags, err
+			}
+			flags.Provider = v
+		case "--model", "-m":
+			v, err := readVal()
+			if err != nil {
+				return rest, flags, err
+			}
+			flags.Model = v
+		case "--yolo":
+			if hasVal {
+				switch strings.ToLower(val) {
+				case "1", "true", "yes":
+					flags.Yolo = true
+				case "0", "false", "no":
+					flags.Yolo = false
+				default:
+					return rest, flags, fmt.Errorf("--yolo: invalid value %q", val)
+				}
+			} else {
+				flags.Yolo = true
+			}
+		default:
+			return rest, flags, fmt.Errorf("unknown flag %q for `mini chat`", key)
+		}
+	}
+	return rest, flags, nil
 }
 
 func getEnv(key, def string) string {
