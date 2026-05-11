@@ -63,6 +63,17 @@ type BashInputResult struct {
 	StartedAt   string `json:"started_at"`
 }
 
+// RiskOf treats every background spawn as at least High, even for ostensibly
+// benign commands — backgrounding means the user loses immediate visibility,
+// which raises the impact of any misjudgement.
+func (bashInputTool) RiskOf(args map[string]any) Risk {
+	cmd, _ := args["command"].(string)
+	if r := classifyBashCommand(cmd); r > RiskHigh {
+		return r
+	}
+	return RiskHigh
+}
+
 func (bashInputTool) Execute(_ context.Context, args map[string]any, _ Caller) (any, error) {
 	command, err := argRequiredString(args, "command")
 	if err != nil {

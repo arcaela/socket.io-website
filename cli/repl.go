@@ -125,9 +125,26 @@ func (c *Chat) handleSlash(ctx context.Context, line string) (done bool, err err
 		fmt.Fprintln(c.out, "  /whoami          provider account info")
 		fmt.Fprintln(c.out, "  /tools           list registered base + composite tools")
 		fmt.Fprintln(c.out, "  /model [<name>]  show or change model")
+		fmt.Fprintln(c.out, "  /yolo [on|off]   toggle skipping the approval prompt for risky tools")
 		fmt.Fprintln(c.out, "  /clear           reset conversation history")
 		fmt.Fprintln(c.out, "  /history         dump current conversation")
 		fmt.Fprintln(c.out, "  /quit            exit")
+		return false, nil
+	case "/yolo":
+		mode := "on"
+		if len(args) > 0 {
+			mode = strings.ToLower(args[0])
+		}
+		switch mode {
+		case "on", "true", "1":
+			c.Agent.Approver = YoloApprover{}
+			fmt.Fprintln(c.out, "yolo on — risky tools will NOT be prompted")
+		case "off", "false", "0":
+			c.Agent.Approver = NewTerminalApprover(c.in, c.out)
+			fmt.Fprintln(c.out, "yolo off — risky tools will prompt for approval")
+		default:
+			fmt.Fprintln(c.out, "usage: /yolo [on|off]")
+		}
 		return false, nil
 	case "/whoami":
 		acc, err := c.Agent.Provider.Account(ctx)

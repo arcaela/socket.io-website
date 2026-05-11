@@ -1,45 +1,40 @@
 # mini Roadmap
 
-Orden por valor / dependencia. Cada item lo cierro con tests + commit antes de
-pasar al siguiente.
+Reordenado por valor real (no por dependencia técnica). Cada item lo cierro
+con tests + commit antes de pasar al siguiente.
 
 ---
 
-## Fase 1 — Endurecer fundamentos (en curso)
+## Fase 1 — Seguridad y usabilidad inmediata
 
-- [ ] **`web_fetch`** real: HTTP GET con timeout, redirects, HTML → texto.
-  ~100 LOC. Empezamos por aquí (más valor por menos esfuerzo).
-- [ ] **`web_search`** real: DuckDuckGo HTML scrape como v1 (sin API key).
-  Plan B: dejar pluggable para añadir Brave/Serper después.
-- [ ] **`/jobs`** slash command + tool `bash_kill(job_id)`: listar y matar
-  background jobs desde el REPL.
-- [ ] **Confirmation policy** para tools destructivas (`bash` con `rm`/`mv`/`>`,
-  `write` que reemplace mucho). Modo `--yolo` para saltarla.
+- [x] **`web_fetch`** real (GET + HTML→text)
+- [x] **`web_search`** real (DDG scraper)
+- [ ] **Confirmation policy** ← AHORA. Tools "destructivas" (bash con
+  rm/dd/mv/>, write masivo, bash_input) requieren aprobación. REPL pregunta
+  por stdin; one-shot deniega por defecto a menos que `--yolo`. La decisión
+  "allow always" se recuerda por sesión.
+- [ ] **`/jobs`** slash command + tool `bash_kill(job_id)`.
 
-## Fase 2 — Multi-provider
+## Fase 2 — Sesiones largas
 
-- [ ] **OpenAI provider** (gpt-5, etc.) — valida la abstracción. Auth por
-  API key (OPENAI_API_KEY env), no OAuth.
-- [ ] **Anthropic provider** (Claude) — segunda validación.
-
-## Fase 3 — MCP
-
-- [ ] **MCP client** stdio + HTTP/SSE — abre el ecosistema externo
-  (filesystem, github, slack, etc.) sin codear cada tool.
-- [ ] Config `~/.mini/mcp.json` para servers + lifecycle (spawn/restart).
-
-## Fase 4 — UX de sesiones largas
-
+- [ ] **Compactación automática del historial**: cuando el prompt > 50% del
+  context window, el agente se auto-resume turn-by-turn y reemplaza el bloque.
 - [ ] **Sesiones persistentes** opcionales (`~/.mini/sessions/<id>.jsonl`)
   con `/save` y `/load`.
-- [ ] **Compactación de historial** automática cuando prompt > 50% del
-  context window: el modelo se auto-resume.
-- [ ] **Token budget** visible en REPL (usado vs cuota estimada).
+- [ ] **Token budget visible** en REPL (tokens usados vs cap del provider).
+
+## Fase 3 — Multi-provider (valida la abstracción)
+
+- [ ] **OpenAI provider**: API key, sin OAuth, default `gpt-5`.
+- [ ] **Anthropic provider**: API key, default Claude más reciente.
+
+## Fase 4 — MCP
+
+- [ ] **MCP client** (stdio + HTTP/SSE).
+- [ ] Config `~/.mini/mcp.json` con lifecycle (spawn/restart).
 
 ## Fase 5 — Pulido
 
-- [ ] Implementar tests para `bash_input` / `bash_output` (eliminados al
-  refactorizar; rehacerlos con el nuevo API).
-- [ ] Soporte real para `--provider` flag (hoy sólo env var).
-- [ ] Distribución: GitHub Releases con binarios pre-compilados para
-  linux/amd64, linux/arm64, darwin/arm64.
+- [ ] Tests para `bash_input`/`bash_output` con el API nuevo.
+- [ ] Flag `--provider` y `--model` en `mini chat`.
+- [ ] GitHub Releases con binarios pre-compilados.

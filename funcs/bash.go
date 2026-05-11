@@ -61,6 +61,13 @@ type BashResult struct {
 
 const bashDefaultTimeoutSeconds = 120
 
+// RiskOf inspects the command for destructive / network-trust patterns.
+// See funcs/risk.go for the lists.
+func (bashTool) RiskOf(args map[string]any) Risk {
+	cmd, _ := args["command"].(string)
+	return classifyBashCommand(cmd)
+}
+
 func (bashTool) Execute(ctx context.Context, args map[string]any, _ Caller) (any, error) {
 	command, err := argRequiredString(args, "command")
 	if err != nil {

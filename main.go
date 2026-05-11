@@ -260,12 +260,21 @@ func runChat(ctx context.Context, args []string) error {
 	}
 
 	if prompt != "" {
+		// One-shot: deny risky tools by default (no human in the loop).
+		// User opts in via MINI_YOLO=1.
+		a.Approver = cli.PolicyApproverForOneShot()
 		fmt.Printf("[provider=%s  model=%s  tools=%d]\n", prov.Name(), model, len(reg.List()))
 		_, err := a.Run(ctx, nil, prompt, &cliSink{})
 		return err
 	}
 
 	isTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+	// REPL: prompt the user before risky tools, unless YOLO is set.
+	if os.Getenv("MINI_YOLO") == "1" {
+		a.Approver = cli.YoloApprover{}
+	} else {
+		a.Approver = cli.NewTerminalApprover(os.Stdin, os.Stdout)
+	}
 	chat := cli.New(a, reg, cli.Options{In: os.Stdin, Out: os.Stdout, IsTTY: isTTY})
 	return chat.Run(ctx)
 }

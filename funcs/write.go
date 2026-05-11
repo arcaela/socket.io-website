@@ -58,6 +58,11 @@ type WriteResult struct {
 	Created     bool   `json:"created,omitempty"`
 }
 
+// RiskOf is High for any edit; we don't try to second-guess "small vs large"
+// since whitespace can be deceptive. Creating a new file is also High since
+// the destination may be a sensitive path.
+func (writeTool) RiskOf(_ map[string]any) Risk { return RiskHigh }
+
 func (writeTool) Execute(_ context.Context, args map[string]any, _ Caller) (any, error) {
 	path, err := argRequiredString(args, "path")
 	if err != nil {

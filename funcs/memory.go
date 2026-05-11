@@ -30,6 +30,9 @@ import (
 
 type MemoryTool struct{}
 
+// RiskOf — memory writes are High: they affect future sessions and sub-agents.
+func (MemoryTool) RiskOf(_ map[string]any) Risk { return RiskHigh }
+
 func (MemoryTool) Name() string         { return "memory" }
 func (MemoryTool) Kind() Kind           { return KindComposite }
 func (MemoryTool) DependsOn() []string  { return []string{"read", "write"} }

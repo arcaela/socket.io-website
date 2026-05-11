@@ -31,12 +31,17 @@ type Sink interface {
 }
 
 type Agent struct {
-	Provider    provider.Provider
-	Tools       *funcs.Registry
-	Model       string
-	MaxSteps    int
-	MaxParallel int    // 0 = default (4); set to 1 for serial execution
+	Provider     provider.Provider
+	Tools        *funcs.Registry
+	Model        string
+	MaxSteps     int
+	MaxParallel  int    // 0 = default (4); set to 1 for serial execution
 	SystemPrompt string // optional; injected as a RoleSystem message at every Generate call (not stored in history)
+
+	// Approver, if non-nil, gates risky tool calls. Low-risk tools always run.
+	// Higher-risk tools consult the Approver and a `DecisionDeny` results in
+	// an error ToolResult fed back to the model (so it can react / retry).
+	Approver Approver
 }
 
 const (
@@ -210,6 +215,27 @@ func (a *Agent) executeToolsParallel(
 				return
 			}
 			defer func() { <-sem }()
+
+			// Approval gate: if the tool is risky and the agent has an
+			// Approver, ask before executing. A Deny becomes an error
+			// tool_result so the model is told why and can adapt.
+			if a.Approver != nil {
+				if tool, ok := a.Tools.Get(calls[i].Name); ok {
+					risk := funcs.AssessRisk(tool, calls[i].Args)
+					if risk > funcs.RiskLow {
+						switch a.Approver.Approve(ctx, calls[i], risk) {
+						case DecisionDeny:
+							results[i] = provider.ToolResult{
+								CallID: calls[i].ID,
+								Name:   calls[i].Name,
+								Error:  fmt.Sprintf("denied by user (risk=%s)", risk),
+							}
+							sink.OnToolResult(results[i])
+							return
+						}
+					}
+				}
+			}
 
 			out, err := a.Tools.Call(ctx, calls[i].Name, calls[i].Args)
 			tr := provider.ToolResult{
