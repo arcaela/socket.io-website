@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -124,6 +125,7 @@ func (c *Chat) handleSlash(ctx context.Context, line string) (done bool, err err
 		fmt.Fprintln(c.out, "  /help            this help")
 		fmt.Fprintln(c.out, "  /whoami          provider account info")
 		fmt.Fprintln(c.out, "  /tools           list registered base + composite tools")
+		fmt.Fprintln(c.out, "  /jobs            list background jobs (started via bash_input)")
 		fmt.Fprintln(c.out, "  /model [<name>]  show or change model")
 		fmt.Fprintln(c.out, "  /yolo [on|off]   toggle skipping the approval prompt for risky tools")
 		fmt.Fprintln(c.out, "  /clear           reset conversation history")
@@ -161,6 +163,22 @@ func (c *Chat) handleSlash(ctx context.Context, line string) (done bool, err err
 				deps = "  uses=" + strings.Join(d, ",")
 			}
 			fmt.Fprintf(c.out, "  %-12s [%s]%s\n", t.Name(), t.Kind(), deps)
+		}
+		return false, nil
+	case "/jobs":
+		jobs := funcs.ListJobs()
+		if len(jobs) == 0 {
+			fmt.Fprintln(c.out, "(no background jobs)")
+			return false, nil
+		}
+		// Stable order (by job_id which encodes timestamp).
+		sort.Slice(jobs, func(i, j int) bool { return jobs[i].JobID < jobs[j].JobID })
+		for _, j := range jobs {
+			status := "exited"
+			if j.Running {
+				status = "running"
+			}
+			fmt.Fprintf(c.out, "  %s  pid=%-6d  %s  %s\n", j.JobID, j.PID, status, j.LogFile)
 		}
 		return false, nil
 	case "/model":

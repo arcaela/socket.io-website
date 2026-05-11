@@ -30,7 +30,7 @@ func TestRegistry_BuiltInValidates(t *testing.T) {
 	if err := r.Validate(); err != nil {
 		t.Fatalf("BuiltIn registry failed validation: %v", err)
 	}
-	expected := []string{"bash", "bash_input", "bash_output", "glob", "memory", "read", "task", "web_fetch", "web_search", "write"}
+	expected := []string{"bash", "bash_input", "bash_kill", "bash_output", "glob", "memory", "read", "task", "web_fetch", "web_search", "write"}
 	got := []string{}
 	for _, tl := range r.List() {
 		got = append(got, tl.Name())

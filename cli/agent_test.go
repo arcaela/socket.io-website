@@ -409,7 +409,7 @@ func TestAgent_ForwardsToolDecls(t *testing.T) {
 	for _, d := range prov.lastReq.Tools {
 		names = append(names, d.Name)
 	}
-	want := []string{"bash", "bash_input", "bash_output", "glob", "memory", "read", "task", "web_fetch", "web_search", "write"}
+	want := []string{"bash", "bash_input", "bash_kill", "bash_output", "glob", "memory", "read", "task", "web_fetch", "web_search", "write"}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("tool decls forwarded wrong:\n got: %v\nwant: %v", names, want)
 	}

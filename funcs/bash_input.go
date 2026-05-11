@@ -186,3 +186,30 @@ func (j *jobMap) lookup(id string) (jobInfo, bool) {
 	return info, ok
 }
 
+// JobSummary is what the REPL's /jobs command sees. Exported because
+// inspectors (cli, future tools) live in a different package.
+type JobSummary struct {
+	JobID   string
+	LogFile string
+	PID     int
+	Running bool
+}
+
+// ListJobs returns a snapshot of every background job this process has
+// started, including ones that already finished (so /jobs can show their
+// log path even after exit).
+func ListJobs() []JobSummary {
+	jobRegistry.mu.RLock()
+	out := make([]JobSummary, 0, len(jobRegistry.m))
+	for id, info := range jobRegistry.m {
+		out = append(out, JobSummary{
+			JobID:   id,
+			LogFile: info.logFile,
+			PID:     info.pid,
+			Running: isPidAlive(info.pid),
+		})
+	}
+	jobRegistry.mu.RUnlock()
+	return out
+}
+
