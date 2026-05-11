@@ -257,6 +257,10 @@ func runChat(ctx context.Context, args []string) error {
 		MaxSteps:     maxSteps,
 		MaxParallel:  maxParallel,
 		SystemPrompt: defaultSystemPrompt(),
+		// Compact when prompt > 8k tokens (≈ 30% of free-tier flash window).
+		// Override with MINI_COMPACT_THRESHOLD=0 to disable, or a different N.
+		Compactor:        cli.ProviderCompactor{Provider: prov, Model: model},
+		CompactThreshold: envInt("MINI_COMPACT_THRESHOLD", 8000),
 	}
 
 	if prompt != "" {

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/arcaela/mini-cli/provider"
@@ -42,11 +43,21 @@ type Agent struct {
 	// Higher-risk tools consult the Approver and a `DecisionDeny` results in
 	// an error ToolResult fed back to the model (so it can react / retry).
 	Approver Approver
+
+	// Compaction: when the most recent turn's PromptTokens exceeds
+	// CompactThreshold (> 0), Run calls Compactor to summarise the older
+	// messages into a single system message, keeping CompactKeepRecent
+	// entries verbatim. Cheap insurance against context-window overflow on
+	// long REPL sessions.
+	Compactor         Compactor
+	CompactThreshold  int // 0 disables
+	CompactKeepRecent int // 0 → defaultCompactKeep
 }
 
 const (
 	defaultMaxSteps    = 25
 	defaultMaxParallel = 4
+	defaultCompactKeep = 6 // last 3 user/assistant pairs survive verbatim
 )
 
 // Run sends `userPrompt` to the model, executes any tool calls it requests,
@@ -147,6 +158,7 @@ func (a *Agent) Run(
 		// Termination: no tool calls means the assistant produced its final reply.
 		if len(toolCalls) == 0 {
 			sink.OnTurnComplete(step + 1)
+			history = a.maybeCompact(ctx, history, lastUsage, sink)
 			return history, nil
 		}
 
@@ -170,6 +182,50 @@ func (a *Agent) Run(
 	err := fmt.Errorf("agent: max steps (%d) reached without final answer", maxSteps)
 	sink.OnError(err)
 	return history, err
+}
+
+// maybeCompact summarises the older portion of `history` into a single
+// system message when the last turn's prompt exceeded CompactThreshold.
+// Keeps CompactKeepRecent (or 6 by default) most recent messages verbatim
+// so the model still has fresh context.
+//
+// Failures are non-fatal: we log to the sink via OnError-equivalent path
+// only if explicitly wired; otherwise the original history is returned and
+// the next turn proceeds normally.
+func (a *Agent) maybeCompact(ctx context.Context, history []provider.Message, lastUsage *provider.Usage, sink Sink) []provider.Message {
+	if a.Compactor == nil || a.CompactThreshold <= 0 {
+		return history
+	}
+	if lastUsage == nil || lastUsage.PromptTokens < a.CompactThreshold {
+		return history
+	}
+	keep := a.CompactKeepRecent
+	if keep <= 0 {
+		keep = defaultCompactKeep
+	}
+	if len(history) <= keep {
+		return history
+	}
+
+	toCompact := history[:len(history)-keep]
+	tail := append([]provider.Message{}, history[len(history)-keep:]...)
+
+	summary, err := a.Compactor.Compact(ctx, toCompact)
+	if err != nil || strings.TrimSpace(summary) == "" {
+		// Silent fallback: prompt-window pressure isn't worth crashing the
+		// turn over. Next turn just keeps the full history; user notices via
+		// rate-limit pressure and can /clear manually.
+		if err != nil {
+			sink.OnError(fmt.Errorf("compaction failed (continuing with full history): %w", err))
+		}
+		return history
+	}
+	return append([]provider.Message{
+		{
+			Role: provider.RoleSystem,
+			Text: "[compacted earlier history; verbatim turns continue below]\n" + summary,
+		},
+	}, tail...)
 }
 
 // executeToolsParallel runs tool calls concurrently with a bounded semaphore.

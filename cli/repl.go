@@ -128,6 +128,7 @@ func (c *Chat) handleSlash(ctx context.Context, line string) (done bool, err err
 		fmt.Fprintln(c.out, "  /jobs            list background jobs (started via bash_input)")
 		fmt.Fprintln(c.out, "  /model [<name>]  show or change model")
 		fmt.Fprintln(c.out, "  /yolo [on|off]   toggle skipping the approval prompt for risky tools")
+		fmt.Fprintln(c.out, "  /compact         summarise older history into a single memo (frees tokens)")
 		fmt.Fprintln(c.out, "  /clear           reset conversation history")
 		fmt.Fprintln(c.out, "  /history         dump current conversation")
 		fmt.Fprintln(c.out, "  /quit            exit")
@@ -192,6 +193,35 @@ func (c *Chat) handleSlash(ctx context.Context, line string) (done bool, err err
 	case "/clear":
 		c.History = nil
 		fmt.Fprintln(c.out, "conversation cleared")
+		return false, nil
+	case "/compact":
+		// Force a compaction right now, even below threshold. Useful when the
+		// user knows the next turn will be expensive.
+		if c.Agent.Compactor == nil {
+			fmt.Fprintln(c.out, "no compactor configured")
+			return false, nil
+		}
+		before := len(c.History)
+		keep := c.Agent.CompactKeepRecent
+		if keep <= 0 {
+			keep = 6
+		}
+		if before <= keep {
+			fmt.Fprintln(c.out, "history too short to compact")
+			return false, nil
+		}
+		toCompact := c.History[:before-keep]
+		tail := append([]provider.Message{}, c.History[before-keep:]...)
+		fmt.Fprint(c.out, "summarising… ")
+		summary, err := c.Agent.Compactor.Compact(ctx, toCompact)
+		if err != nil {
+			fmt.Fprintln(c.out, "failed:", err)
+			return false, nil
+		}
+		c.History = append([]provider.Message{
+			{Role: provider.RoleSystem, Text: "[compacted earlier history; verbatim turns continue below]\n" + summary},
+		}, tail...)
+		fmt.Fprintf(c.out, "done. history: %d → %d messages\n", before, len(c.History))
 		return false, nil
 	case "/history":
 		for i, m := range c.History {
