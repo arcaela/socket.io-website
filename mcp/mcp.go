@@ -11,10 +11,12 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,10 +47,18 @@ import (
 //   }
 // }
 
+// ServerConfig specifies one MCP server. Two transports are supported:
+//   - stdio (the default): set Command (+ Args + Env). mini spawns the
+//     binary and speaks JSON-RPC over its stdin/stdout.
+//   - http:  set URL (and optional Headers). mini POSTs each request and
+//     reads the JSON-RPC response from the HTTP body. No streaming yet.
 type ServerConfig struct {
-	Command string            `json:"command"`
+	Command string            `json:"command,omitempty"`
 	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
+
+	URL     string            `json:"url,omitempty"`     // when set, transport is HTTP
+	Headers map[string]string `json:"headers,omitempty"` // forwarded with every HTTP request (e.g. Authorization)
 }
 
 type Config struct {
@@ -150,23 +160,37 @@ type ContentPart struct {
 // Client: one process per MCP server.
 // =============================================================================
 
+// transport is "stdio" (subprocess + JSON-RPC over pipes) or "http"
+// (POST + JSON response). The Client struct holds both possible fields;
+// only the ones for the active transport are populated.
 type Client struct {
-	name    string
+	name      string
+	transport string
+
+	// stdio
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
 	stdout  *bufio.Reader
 	nextID  int64
-
 	mu      sync.Mutex
 	pending map[int]chan rpcResponse
 	closed  bool
+
+	// http
+	httpURL    string
+	httpClient *http.Client
+	httpHdrs   map[string]string
 }
 
-// Start launches the MCP server subprocess and performs the JSON-RPC
-// handshake (`initialize` + `initialized` notification).
+// Start brings up the configured server (stdio subprocess OR HTTP endpoint)
+// and performs the JSON-RPC handshake (`initialize` + `initialized` notify).
+// Picks the transport from ServerConfig.URL vs ServerConfig.Command.
 func Start(ctx context.Context, name string, srv ServerConfig) (*Client, error) {
+	if srv.URL != "" {
+		return startHTTP(ctx, name, srv)
+	}
 	if srv.Command == "" {
-		return nil, fmt.Errorf("server %q: command is empty", name)
+		return nil, fmt.Errorf("server %q: must set either `command` (stdio) or `url` (http)", name)
 	}
 	cmd := exec.Command(srv.Command, srv.Args...)
 	cmd.Env = os.Environ()
@@ -189,11 +213,12 @@ func Start(ctx context.Context, name string, srv ServerConfig) (*Client, error) 
 	}
 
 	c := &Client{
-		name:    name,
-		cmd:     cmd,
-		stdin:   stdin,
-		stdout:  bufio.NewReader(stdout),
-		pending: map[int]chan rpcResponse{},
+		name:      name,
+		transport: "stdio",
+		cmd:       cmd,
+		stdin:     stdin,
+		stdout:    bufio.NewReader(stdout),
+		pending:   map[int]chan rpcResponse{},
 	}
 	go c.readerLoop()
 
@@ -249,7 +274,7 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 	return res, nil
 }
 
-// Close terminates the subprocess. Idempotent.
+// Close terminates the transport. Idempotent.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	if c.closed {
@@ -259,11 +284,19 @@ func (c *Client) Close() error {
 	c.closed = true
 	c.mu.Unlock()
 
-	_ = c.stdin.Close()
-	if c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
+	switch c.transport {
+	case "stdio":
+		_ = c.stdin.Close()
+		if c.cmd != nil && c.cmd.Process != nil {
+			_ = c.cmd.Process.Kill()
+		}
+		if c.cmd != nil {
+			_ = c.cmd.Wait()
+		}
+	case "http":
+		// HTTP transport has no long-lived connection to tear down.
+		c.httpClient = nil
 	}
-	_ = c.cmd.Wait()
 	return nil
 }
 
@@ -275,6 +308,13 @@ func (c *Client) Name() string { return c.name }
 // =============================================================================
 
 func (c *Client) call(ctx context.Context, method string, params json.RawMessage, timeout time.Duration) (json.RawMessage, error) {
+	if c.transport == "http" {
+		return c.callHTTP(ctx, method, params, timeout)
+	}
+	return c.callStdio(ctx, method, params, timeout)
+}
+
+func (c *Client) callStdio(ctx context.Context, method string, params json.RawMessage, timeout time.Duration) (json.RawMessage, error) {
 	id := int(atomic.AddInt64(&c.nextID, 1))
 	ch := make(chan rpcResponse, 1)
 	c.mu.Lock()
@@ -310,6 +350,25 @@ func (c *Client) call(ctx context.Context, method string, params json.RawMessage
 func (c *Client) notify(method string, params json.RawMessage) error {
 	n := rpcNotification{JSONRPC: "2.0", Method: method, Params: params}
 	data, _ := json.Marshal(n)
+
+	if c.transport == "http" {
+		// HTTP transport: POST the notification, ignore the response body.
+		// Spec says servers MAY return 202 Accepted; either way we drop it.
+		req, err := http.NewRequest("POST", c.httpURL, bytes.NewReader(data))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range c.httpHdrs {
+			req.Header.Set(k, v)
+		}
+		res, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		_ = res.Body.Close()
+		return nil
+	}
 	_, err := c.stdin.Write(append(data, '\n'))
 	return err
 }
@@ -340,6 +399,84 @@ func (c *Client) readerLoop() {
 			ch <- resp
 		}
 	}
+}
+
+// =============================================================================
+// HTTP transport — POST one JSON-RPC request, read the response synchronously.
+// Streaming SSE responses are NOT supported in this transport; for streaming
+// servers, use stdio.
+// =============================================================================
+
+func startHTTP(ctx context.Context, name string, srv ServerConfig) (*Client, error) {
+	c := &Client{
+		name:       name,
+		transport:  "http",
+		httpURL:    srv.URL,
+		httpHdrs:   srv.Headers,
+		httpClient: &http.Client{}, // per-call timeout is set via context
+		pending:    map[int]chan rpcResponse{},
+	}
+
+	// initialize handshake — same shape as stdio.
+	initParams, _ := json.Marshal(map[string]any{
+		"protocolVersion": "2024-11-05",
+		"clientInfo":      map[string]any{"name": "mini-cli", "version": "0.1.0"},
+		"capabilities":    map[string]any{},
+	})
+	if _, err := c.call(ctx, "initialize", initParams, 10*time.Second); err != nil {
+		return nil, fmt.Errorf("initialize %q (http): %w", name, err)
+	}
+	if err := c.notify("notifications/initialized", nil); err != nil {
+		return nil, fmt.Errorf("initialized notify %q: %w", name, err)
+	}
+	return c, nil
+}
+
+func (c *Client) callHTTP(ctx context.Context, method string, params json.RawMessage, timeout time.Duration) (json.RawMessage, error) {
+	id := int(atomic.AddInt64(&c.nextID, 1))
+	body, _ := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params})
+
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, "POST", c.httpURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	for k, v := range c.httpHdrs {
+		req.Header.Set(k, v)
+	}
+
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mcp %s http: %w", c.name, err)
+	}
+	defer res.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(res.Body, 16<<20))
+	if err != nil {
+		return nil, err
+	}
+	if res.StatusCode >= 400 {
+		return nil, fmt.Errorf("mcp %s http %d: %s", c.name, res.StatusCode, truncate(string(raw), 300))
+	}
+	var resp rpcResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("mcp %s decode: %w (body=%s)", c.name, err, truncate(string(raw), 300))
+	}
+	if resp.Error != nil {
+		return nil, resp.Error
+	}
+	return resp.Result, nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // =============================================================================
