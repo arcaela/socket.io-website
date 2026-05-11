@@ -1,40 +1,33 @@
 # mini Roadmap
 
-Reordenado por valor real (no por dependencia técnica). Cada item lo cierro
-con tests + commit antes de pasar al siguiente.
+Estado actual: 7 commits acumulados en `mini-v4` (Fase 1–4 cerradas).
+Próximo bloque ordenado por relación valor/coste:
 
 ---
 
-## Fase 1 — Seguridad y usabilidad inmediata
+## Fase 5 — Visibilidad de coste y sesiones (en curso)
 
-- [x] **`web_fetch`** real (GET + HTML→text)
-- [x] **`web_search`** real (DDG scraper)
-- [ ] **Confirmation policy** ← AHORA. Tools "destructivas" (bash con
-  rm/dd/mv/>, write masivo, bash_input) requieren aprobación. REPL pregunta
-  por stdin; one-shot deniega por defecto a menos que `--yolo`. La decisión
-  "allow always" se recuerda por sesión.
-- [ ] **`/jobs`** slash command + tool `bash_kill(job_id)`.
+- [ ] **Token budget visible**: contador acumulado por sesión en REPL +
+  slash `/tokens`. Muestra qué tan cerca está el prompt del umbral de
+  compactación.
+- [ ] **Sesiones persistentes**: guardar la conversación a
+  `~/.mini/sessions/<id>.jsonl` y poder cargarla. Slash `/save [name]` y
+  `/load <id>`. Lista con `/sessions`.
 
-## Fase 2 — Sesiones largas
+## Fase 6 — CLI polish
 
-- [ ] **Compactación automática del historial**: cuando el prompt > 50% del
-  context window, el agente se auto-resume turn-by-turn y reemplaza el bloque.
-- [ ] **Sesiones persistentes** opcionales (`~/.mini/sessions/<id>.jsonl`)
-  con `/save` y `/load`.
-- [ ] **Token budget visible** en REPL (tokens usados vs cap del provider).
+- [ ] **Flags `--provider`**, **`--model`**, **`--yolo`** en `mini chat`
+  (hoy sólo por env var).
+- [ ] **Tests reales de `bash_input` / `bash_output`** con el API nuevo
+  (los viejos se borraron al refactor).
 
-## Fase 3 — Multi-provider (valida la abstracción)
+## Fase 7 — Más proveedores y transportes
 
-- [ ] **OpenAI provider**: API key, sin OAuth, default `gpt-5`.
-- [ ] **Anthropic provider**: API key, default Claude más reciente.
+- [ ] **Anthropic provider** (tercera validación de la abstracción).
+- [ ] **MCP HTTP/SSE transport** (hoy sólo stdio).
 
-## Fase 4 — MCP
+## Fase 8 — Distribución
 
-- [ ] **MCP client** (stdio + HTTP/SSE).
-- [ ] Config `~/.mini/mcp.json` con lifecycle (spawn/restart).
-
-## Fase 5 — Pulido
-
-- [ ] Tests para `bash_input`/`bash_output` con el API nuevo.
-- [ ] Flag `--provider` y `--model` en `mini chat`.
-- [ ] GitHub Releases con binarios pre-compilados.
+- [ ] **GitHub Actions** para producir binarios pre-compilados en releases
+  (`linux/amd64`, `linux/arm64`, `darwin/arm64`).
+- [ ] **README publicable** con ejemplos reales del agente.

@@ -40,6 +40,12 @@ type Chat struct {
 	out     io.Writer
 	in      io.Reader
 	tty     bool
+
+	// Cumulative token usage across the session, updated from each turn's
+	// provider.Usage. Exposed via /tokens.
+	totalsMu  sync.Mutex
+	totals    provider.Usage
+	lastUsage provider.Usage
 }
 
 func New(a *Agent, reg *funcs.Registry, opts Options) *Chat {
@@ -95,8 +101,9 @@ func (c *Chat) Run(ctx context.Context) error {
 			continue
 		}
 
-		// Live sink writes events directly to c.out.
-		sink := &terminalSink{out: c.out, tty: c.tty}
+		// Live sink writes events directly to c.out AND threads usage
+		// back into the Chat so /tokens has the full picture.
+		sink := &terminalSink{out: c.out, tty: c.tty, onUsage: c.recordUsage}
 		newHistory, err := c.Agent.Run(ctx, c.History, line, sink)
 		if err != nil && !isCancelled(err) {
 			fmt.Fprintln(c.out, "✗", err)
@@ -110,6 +117,19 @@ func (c *Chat) printPrompt() {
 	if c.tty {
 		fmt.Fprint(c.out, "\n› ")
 	}
+}
+
+// recordUsage is the terminalSink → Chat callback. Accumulates cumulative
+// totals (used by /tokens) and remembers the last turn's numbers so the
+// compaction-distance hint stays accurate even after several turns.
+func (c *Chat) recordUsage(u provider.Usage) {
+	c.totalsMu.Lock()
+	defer c.totalsMu.Unlock()
+	c.lastUsage = u
+	c.totals.PromptTokens += u.PromptTokens
+	c.totals.OutputTokens += u.OutputTokens
+	c.totals.ThoughtTokens += u.ThoughtTokens
+	c.totals.TotalTokens += u.TotalTokens
 }
 
 func (c *Chat) handleSlash(ctx context.Context, line string) (done bool, err error) {
@@ -129,6 +149,7 @@ func (c *Chat) handleSlash(ctx context.Context, line string) (done bool, err err
 		fmt.Fprintln(c.out, "  /model [<name>]  show or change model")
 		fmt.Fprintln(c.out, "  /yolo [on|off]   toggle skipping the approval prompt for risky tools")
 		fmt.Fprintln(c.out, "  /compact         summarise older history into a single memo (frees tokens)")
+		fmt.Fprintln(c.out, "  /tokens          last-turn + cumulative token usage; compaction headroom")
 		fmt.Fprintln(c.out, "  /clear           reset conversation history")
 		fmt.Fprintln(c.out, "  /history         dump current conversation")
 		fmt.Fprintln(c.out, "  /quit            exit")
@@ -223,6 +244,29 @@ func (c *Chat) handleSlash(ctx context.Context, line string) (done bool, err err
 		}, tail...)
 		fmt.Fprintf(c.out, "done. history: %d → %d messages\n", before, len(c.History))
 		return false, nil
+	case "/tokens":
+		c.totalsMu.Lock()
+		t := c.totals
+		last := c.lastUsage
+		c.totalsMu.Unlock()
+		fmt.Fprintf(c.out, "last turn:  prompt=%d  out=%d  thoughts=%d  total=%d\n",
+			last.PromptTokens, last.OutputTokens, last.ThoughtTokens, last.TotalTokens)
+		fmt.Fprintf(c.out, "session:    prompt=%d  out=%d  thoughts=%d  total=%d\n",
+			t.PromptTokens, t.OutputTokens, t.ThoughtTokens, t.TotalTokens)
+		if c.Agent.CompactThreshold > 0 {
+			delta := c.Agent.CompactThreshold - last.PromptTokens
+			switch {
+			case last.PromptTokens == 0:
+				fmt.Fprintf(c.out, "compaction: triggers at prompt=%d tokens\n", c.Agent.CompactThreshold)
+			case delta <= 0:
+				fmt.Fprintf(c.out, "compaction: ARMED — next turn will summarise (threshold %d, last prompt %d)\n",
+					c.Agent.CompactThreshold, last.PromptTokens)
+			default:
+				fmt.Fprintf(c.out, "compaction: %d tokens of headroom (threshold %d)\n",
+					delta, c.Agent.CompactThreshold)
+			}
+		}
+		return false, nil
 	case "/history":
 		for i, m := range c.History {
 			summary := summarizeMessage(m)
@@ -245,6 +289,11 @@ type terminalSink struct {
 	tty         bool
 	mu          sync.Mutex
 	thoughtOpen bool
+
+	// onUsage is invoked once per turn with the usage emitted by the
+	// provider. Set by the Chat that owns this sink so /tokens can show
+	// session-wide totals.
+	onUsage func(provider.Usage)
 }
 
 func (s *terminalSink) OnUserMessage(_ string) {}
@@ -299,6 +348,11 @@ func (s *terminalSink) OnToolResult(r provider.ToolResult) {
 }
 
 func (s *terminalSink) OnUsage(u provider.Usage) {
+	// Always forward usage to the owning chat so /tokens stays accurate,
+	// even outside a TTY (one-shot mode etc. — though we mostly run in tty).
+	if s.onUsage != nil {
+		s.onUsage(u)
+	}
 	if !s.tty {
 		return
 	}
