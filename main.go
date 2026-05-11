@@ -25,6 +25,7 @@ import (
 	// Blank-import the providers we ship so their init() runs and they
 	// self-register with the provider registry. To add another backend, add
 	// its blank import here and that's it.
+	_ "github.com/arcaela/mini-cli/provider/anthropic"
 	_ "github.com/arcaela/mini-cli/provider/gemini"
 	_ "github.com/arcaela/mini-cli/provider/openai"
 )
