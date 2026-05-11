@@ -150,6 +150,9 @@ func (c *Chat) handleSlash(ctx context.Context, line string) (done bool, err err
 		fmt.Fprintln(c.out, "  /yolo [on|off]   toggle skipping the approval prompt for risky tools")
 		fmt.Fprintln(c.out, "  /compact         summarise older history into a single memo (frees tokens)")
 		fmt.Fprintln(c.out, "  /tokens          last-turn + cumulative token usage; compaction headroom")
+		fmt.Fprintln(c.out, "  /save [name]     persist this session to ~/.mini/sessions/<id>.jsonl")
+		fmt.Fprintln(c.out, "  /load <id>       replace history with a saved session (prefix match OK)")
+		fmt.Fprintln(c.out, "  /sessions        list saved sessions")
 		fmt.Fprintln(c.out, "  /clear           reset conversation history")
 		fmt.Fprintln(c.out, "  /history         dump current conversation")
 		fmt.Fprintln(c.out, "  /quit            exit")
@@ -243,6 +246,44 @@ func (c *Chat) handleSlash(ctx context.Context, line string) (done bool, err err
 			{Role: provider.RoleSystem, Text: "[compacted earlier history; verbatim turns continue below]\n" + summary},
 		}, tail...)
 		fmt.Fprintf(c.out, "done. history: %d → %d messages\n", before, len(c.History))
+		return false, nil
+	case "/save":
+		name := strings.Join(args, " ")
+		path, err := SaveSession(name, c.History)
+		if err != nil {
+			return false, err
+		}
+		fmt.Fprintf(c.out, "saved %d message(s) to %s\n", len(c.History), path)
+		return false, nil
+	case "/load":
+		if len(args) == 0 {
+			return false, fmt.Errorf("usage: /load <id>")
+		}
+		hist, err := LoadSession(args[0])
+		if err != nil {
+			return false, err
+		}
+		c.History = hist
+		// Reset cumulative usage — old totals belonged to a different run.
+		c.totalsMu.Lock()
+		c.totals = provider.Usage{}
+		c.lastUsage = provider.Usage{}
+		c.totalsMu.Unlock()
+		fmt.Fprintf(c.out, "loaded %d message(s) from %q\n", len(hist), args[0])
+		return false, nil
+	case "/sessions":
+		ss, err := ListSessions()
+		if err != nil {
+			return false, err
+		}
+		if len(ss) == 0 {
+			fmt.Fprintln(c.out, "(no saved sessions)")
+			return false, nil
+		}
+		for _, s := range ss {
+			fmt.Fprintf(c.out, "  %-44s  %s  msgs=%d  %s\n",
+				s.ID, s.SavedAt.Local().Format("2006-01-02 15:04"), s.Messages, byteSize(s.Size))
+		}
 		return false, nil
 	case "/tokens":
 		c.totalsMu.Lock()
@@ -400,6 +441,17 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+func byteSize(n int64) string {
+	switch {
+	case n < 1<<10:
+		return fmt.Sprintf("%dB", n)
+	case n < 1<<20:
+		return fmt.Sprintf("%.1fK", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%.1fM", float64(n)/(1<<20))
+	}
 }
 
 func isCancelled(err error) bool {
