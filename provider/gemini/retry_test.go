@@ -1,4 +1,4 @@
-package wire
+package gemini
 
 import (
 	"net/http"
@@ -115,7 +115,7 @@ func TestDoWithRetry_Retries429ThenSucceeds(t *testing.T) {
 	})
 	defer srv.Close()
 
-	c := New("token")
+	c := newClient("token")
 	build := func() (*http.Request, error) {
 		return http.NewRequest("GET", srv.URL, nil)
 	}
@@ -143,7 +143,7 @@ func TestDoWithRetry_GivesUpAfterMax(t *testing.T) {
 	})
 	defer srv.Close()
 
-	c := New("token")
+	c := newClient("token")
 	build := func() (*http.Request, error) {
 		return http.NewRequest("GET", srv.URL, nil)
 	}
@@ -168,7 +168,7 @@ func TestDoWithRetry_4xxFailsImmediately(t *testing.T) {
 	})
 	defer srv.Close()
 
-	c := New("token")
+	c := newClient("token")
 	build := func() (*http.Request, error) {
 		return http.NewRequest("GET", srv.URL, nil)
 	}

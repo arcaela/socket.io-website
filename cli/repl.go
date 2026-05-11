@@ -10,7 +10,7 @@
 //   ↲ result: {…}
 //   <assistant continues, possibly more tools…>
 //   [tokens: prompt=N out=N thoughts=N total=N]
-package gui
+package cli
 
 import (
 	"bufio"
@@ -22,9 +22,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/arcaela/mini-cli/internal/agent"
-	"github.com/arcaela/mini-cli/internal/provider"
-	"github.com/arcaela/mini-cli/internal/tools"
+	"github.com/arcaela/mini-cli/provider"
+	"github.com/arcaela/mini-cli/funcs"
 )
 
 type Options struct {
@@ -34,15 +33,15 @@ type Options struct {
 }
 
 type Chat struct {
-	Agent   *agent.Agent
-	Tools   *tools.Registry
+	Agent   *Agent
+	Tools   *funcs.Registry
 	History []provider.Message
 	out     io.Writer
 	in      io.Reader
 	tty     bool
 }
 
-func New(a *agent.Agent, reg *tools.Registry, opts Options) *Chat {
+func New(a *Agent, reg *funcs.Registry, opts Options) *Chat {
 	if opts.Out == nil {
 		opts.Out = os.Stdout
 	}
@@ -170,7 +169,7 @@ func (c *Chat) handleSlash(ctx context.Context, line string) (done bool, err err
 	}
 }
 
-// ----- terminalSink: agent.Sink that writes a clean transcript -----
+// ----- terminalSink: Sink that writes a clean transcript -----
 //
 // Tool execution runs in parallel goroutines, so OnToolCall / OnToolResult
 // can be invoked concurrently. We serialize all writes with a mutex to keep

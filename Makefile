@@ -5,7 +5,7 @@ BIN_DIR := bin
 
 build:
 	@mkdir -p $(BIN_DIR)
-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN_DIR)/$(BINARY) ./cmd/mini
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN_DIR)/$(BINARY) .
 
 run: build
 	./$(BIN_DIR)/$(BINARY)

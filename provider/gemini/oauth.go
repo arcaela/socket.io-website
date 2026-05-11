@@ -1,7 +1,7 @@
 // Package oauth runs Google's PKCE OAuth 2.0 flow for the gemini-cli's
 // public installed-app client. It is the Gemini provider's private
 // credential store — nothing outside the gemini package should depend on it.
-package oauth
+package gemini
 
 import (
 	"context"
@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/arcaela/mini-cli/internal/config"
+	"github.com/arcaela/mini-cli/config"
 )
 
 // =============================================================================

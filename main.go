@@ -16,16 +16,15 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/arcaela/mini-cli/internal/agent"
-	"github.com/arcaela/mini-cli/internal/config"
-	"github.com/arcaela/mini-cli/internal/gui"
-	"github.com/arcaela/mini-cli/internal/provider"
-	"github.com/arcaela/mini-cli/internal/tools"
+	"github.com/arcaela/mini-cli/config"
+	"github.com/arcaela/mini-cli/cli"
+	"github.com/arcaela/mini-cli/provider"
+	"github.com/arcaela/mini-cli/funcs"
 
 	// Blank-import the providers we ship so their init() runs and they
 	// self-register with the provider registry. To add another backend, add
 	// its blank import here and that's it.
-	_ "github.com/arcaela/mini-cli/internal/provider/gemini"
+	_ "github.com/arcaela/mini-cli/provider/gemini"
 )
 
 // defaultProviderName is what `mini` selects when MINI_PROVIDER is unset.
@@ -50,7 +49,7 @@ func mainImpl() int {
 	// Any background process the agent spawned dies when we exit, no matter
 	// which subcommand we ran.
 	defer func() {
-		killed := tools.ShutdownBackgroundJobs(2 * time.Second)
+		killed := funcs.ShutdownBackgroundJobs(2 * time.Second)
 		if killed > 0 && os.Getenv("MINI_QUIET") != "1" {
 			fmt.Fprintf(os.Stderr, "[mini] cleaned up %d background job(s) on exit\n", killed)
 		}
@@ -175,7 +174,7 @@ func runWhoami(ctx context.Context) error {
 // ---------------- tools ----------------
 
 func runTools(ctx context.Context, args []string) error {
-	reg := tools.BuiltIn()
+	reg := funcs.BuiltIn()
 	sub := ""
 	if len(args) > 0 {
 		sub = args[0]
@@ -250,8 +249,8 @@ func runChat(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	reg := tools.BuiltIn()
-	a := &agent.Agent{
+	reg := funcs.BuiltIn()
+	a := &cli.Agent{
 		Provider:     prov,
 		Tools:        reg,
 		Model:        model,
@@ -267,7 +266,7 @@ func runChat(ctx context.Context, args []string) error {
 	}
 
 	isTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
-	chat := gui.New(a, reg, gui.Options{In: os.Stdin, Out: os.Stdout, IsTTY: isTTY})
+	chat := cli.New(a, reg, cli.Options{In: os.Stdin, Out: os.Stdout, IsTTY: isTTY})
 	return chat.Run(ctx)
 }
 
@@ -280,7 +279,7 @@ func defaultSystemPrompt() string {
 	if base == "" {
 		base = baseSystemPrompt()
 	}
-	if mem, err := tools.LoadMemoryContent(); err == nil && mem != "" {
+	if mem, err := funcs.LoadMemoryContent(); err == nil && mem != "" {
 		return base + "\n" + mem + "\n"
 	}
 	return base
@@ -288,7 +287,7 @@ func defaultSystemPrompt() string {
 
 func baseSystemPrompt() string {
 	cwd, _ := os.Getwd()
-	return fmt.Sprintf(`You are mini, a focused coding agent that operates through these tools.
+	return fmt.Sprintf(`You are mini, a focused coding agent that operates through these funcs.
 
 TOOLS
 
@@ -308,7 +307,7 @@ TOOLS
 - glob      Find files or directories by pattern. Args: pattern, path,
             type (f|d|a), max_results, include_hidden. Use "**" for
             recursive matching.
-- task      Delegate a sub-task to a fresh sub-agent. Args: prompt,
+- task      Delegate a sub-task to a fresh sub-cli. Args: prompt,
             background. Foreground blocks until the sub-agent finishes and
             returns its full transcript. Background returns a log_file you
             can poll later. Use this to fan out long investigations.

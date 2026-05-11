@@ -2,7 +2,7 @@
 // feed results back → repeat until the model emits text-only or we hit max
 // steps. It is provider-agnostic; the only LLM-specific code lives in
 // internal/provider/<vendor>.
-package agent
+package cli
 
 import (
 	"context"
@@ -11,8 +11,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/arcaela/mini-cli/internal/provider"
-	"github.com/arcaela/mini-cli/internal/tools"
+	"github.com/arcaela/mini-cli/provider"
+	"github.com/arcaela/mini-cli/funcs"
 )
 
 // Sink is how the agent reports progress to whoever started it (the GUI in
@@ -32,7 +32,7 @@ type Sink interface {
 
 type Agent struct {
 	Provider    provider.Provider
-	Tools       *tools.Registry
+	Tools       *funcs.Registry
 	Model       string
 	MaxSteps    int
 	MaxParallel int    // 0 = default (4); set to 1 for serial execution
@@ -231,7 +231,7 @@ func (a *Agent) executeToolsParallel(
 
 // ----- helpers -----
 
-func buildToolDecls(reg *tools.Registry) []provider.ToolDecl {
+func buildToolDecls(reg *funcs.Registry) []provider.ToolDecl {
 	if reg == nil {
 		return nil
 	}

@@ -9,13 +9,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/arcaela/mini-cli/internal/provider/gemini/internal/wire"
-	"github.com/arcaela/mini-cli/internal/provider/gemini/internal/oauth"
-	"github.com/arcaela/mini-cli/internal/provider"
+	"github.com/arcaela/mini-cli/provider"
 )
 
 type Provider struct {
-	client    *wire.Client
+	client    *Client
 	projectID string
 	tierID    string
 	email     string
@@ -26,13 +24,13 @@ type Provider struct {
 func New(ctx context.Context) (*Provider, error) {
 	// Move legacy ~/.mini/creds.json (pre-refactor) into the provider-
 	// namespaced location. No-op when already migrated.
-	_ = oauth.MigrateLegacyState()
+	_ = MigrateLegacyState()
 
-	token, creds, err := oauth.EnsureAccessToken(ctx)
+	token, creds, err := EnsureAccessToken(ctx)
 	if err != nil {
 		return nil, err
 	}
-	client := wire.New(token)
+	client := newClient(token)
 	projectID, tierID, err := client.EnsureOnboarded(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("onboard: %w", err)
@@ -88,7 +86,7 @@ func (p *Provider) Generate(ctx context.Context, req provider.GenerateRequest) (
 			contents,
 			systemInstruction,
 			tools,
-			func(part wire.Part) {
+			func(part Part) {
 				switch {
 				case part.Thought && part.Text != "":
 					emit(provider.Event{Kind: provider.EventThoughtDelta, Text: part.Text})
@@ -119,16 +117,16 @@ func (p *Provider) Generate(ctx context.Context, req provider.GenerateRequest) (
 	return out, nil
 }
 
-// ----- Translation: provider.Message ↔ wire.Content -----
+// ----- Translation: provider.Message ↔ Content -----
 
 // messagesToContents splits provider Messages into Gemini's two-channel
 // representation: regular conversation `contents` and a separate
 // `systemInstruction`. Multiple system messages are concatenated. Gemini
 // treats systemInstruction as out-of-band priming and does NOT bill it
 // against the conversation history (so it's free to re-send each turn).
-func messagesToContents(msgs []provider.Message) ([]wire.Content, *wire.Content, error) {
+func messagesToContents(msgs []provider.Message) ([]Content, *Content, error) {
 	var sysBuf strings.Builder
-	out := make([]wire.Content, 0, len(msgs))
+	out := make([]Content, 0, len(msgs))
 
 	for _, m := range msgs {
 		if m.Role == provider.RoleSystem {
@@ -138,7 +136,7 @@ func messagesToContents(msgs []provider.Message) ([]wire.Content, *wire.Content,
 			sysBuf.WriteString(m.Text)
 			continue
 		}
-		c := wire.Content{}
+		c := Content{}
 		switch m.Role {
 		case provider.RoleUser:
 			c.Role = "user"
@@ -152,7 +150,7 @@ func messagesToContents(msgs []provider.Message) ([]wire.Content, *wire.Content,
 		switch {
 		case m.ToolCall != nil:
 			c.Role = "model"
-			c.Parts = []wire.Part{{
+			c.Parts = []Part{{
 				FunctionCall: map[string]any{
 					"name": m.ToolCall.Name,
 					"args": m.ToolCall.Args,
@@ -166,24 +164,24 @@ func messagesToContents(msgs []provider.Message) ([]wire.Content, *wire.Content,
 			} else {
 				respPayload["result"] = m.ToolResult.Result
 			}
-			c.Parts = []wire.Part{{
+			c.Parts = []Part{{
 				FunctionResponse: map[string]any{
 					"name":     m.ToolResult.Name,
 					"response": respPayload,
 				},
 			}}
 		default:
-			c.Parts = []wire.Part{{Text: m.Text}}
+			c.Parts = []Part{{Text: m.Text}}
 		}
 		out = append(out, c)
 	}
 
-	var systemInstruction *wire.Content
+	var systemInstruction *Content
 	if sysBuf.Len() > 0 {
-		systemInstruction = &wire.Content{
+		systemInstruction = &Content{
 			// Gemini's systemInstruction Content typically uses role "user".
 			Role:  "user",
-			Parts: []wire.Part{{Text: sysBuf.String()}},
+			Parts: []Part{{Text: sysBuf.String()}},
 		}
 	}
 	return out, systemInstruction, nil

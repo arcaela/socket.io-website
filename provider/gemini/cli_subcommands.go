@@ -6,9 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/arcaela/mini-cli/internal/provider"
-	"github.com/arcaela/mini-cli/internal/provider/gemini/internal/oauth"
-	"github.com/arcaela/mini-cli/internal/provider/gemini/internal/wire"
+	"github.com/arcaela/mini-cli/provider"
 )
 
 // DefaultModel is exported so the central CLI can ask each provider what to
@@ -40,16 +38,16 @@ func init() {
 func runAuth(ctx context.Context, args []string) error {
 	// Make sure legacy creds (~/.mini/creds.json) move to the new
 	// provider-namespaced location before generating fresh pending state.
-	_ = oauth.MigrateLegacyState()
+	_ = MigrateLegacyState()
 
-	pkce, err := oauth.NewPkce()
+	pkce, err := NewPkce()
 	if err != nil {
 		return err
 	}
-	if err := oauth.SavePending(pkce); err != nil {
+	if err := SavePending(pkce); err != nil {
 		return err
 	}
-	authURL := oauth.BuildAuthURL(pkce)
+	authURL := BuildAuthURL(pkce)
 	fmt.Println("\n=== STEP 1: open this URL in your browser and consent ===")
 	fmt.Println()
 	fmt.Println(authURL)
@@ -59,7 +57,7 @@ func runAuth(ctx context.Context, args []string) error {
 	fmt.Println()
 	fmt.Println("    mini provider gemini auth-complete \"<paste here>\"")
 	fmt.Println()
-	fmt.Println("PKCE state persisted to", oauth.PendingFile())
+	fmt.Println("PKCE state persisted to", PendingFile())
 	return nil
 }
 
@@ -69,29 +67,29 @@ func runAuthComplete(ctx context.Context, args []string) error {
 	if pasted == "" {
 		return fmt.Errorf("usage: mini provider gemini auth-complete \"<URL-or-code>\"")
 	}
-	pending, err := oauth.LoadPending()
+	pending, err := LoadPending()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("no pending auth; run `mini provider gemini auth` first")
 		}
 		return err
 	}
-	code, err := oauth.ExtractCode(pasted, pending.State)
+	code, err := ExtractCode(pasted, pending.State)
 	if err != nil {
 		return err
 	}
-	creds, err := oauth.ExchangeCodeForTokens(ctx, code, pending.Verifier)
+	creds, err := ExchangeCodeForTokens(ctx, code, pending.Verifier)
 	if err != nil {
 		return err
 	}
-	if ui, err := wire.New(creds.AccessToken).UserInfo(ctx); err == nil {
+	if ui, err := newClient(creds.AccessToken).UserInfo(ctx); err == nil {
 		creds.Email = ui.Email
 	}
-	if err := oauth.SaveCreds(creds); err != nil {
+	if err := SaveCreds(creds); err != nil {
 		return err
 	}
-	oauth.ClearPending()
-	fmt.Println("✓ Credentials saved to", oauth.CredsFile())
+	ClearPending()
+	fmt.Println("✓ Credentials saved to", CredsFile())
 	if creds.Email != "" {
 		fmt.Println("  Account:", creds.Email)
 	}

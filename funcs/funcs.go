@@ -5,7 +5,7 @@
 // Adding a new tool: implement Tool, then call Registry.Register or extend
 // BuiltIn(). Composites should keep their dependencies named (string) so the
 // registry stays the single source of truth.
-package tools
+package funcs
 
 import (
 	"context"
@@ -17,7 +17,7 @@ import (
 type Kind int
 
 const (
-	KindBase      Kind = iota // No dependencies on other tools.
+	KindBase      Kind = iota // No dependencies on other 
 	KindComposite             // Calls one or more other tools via Caller.
 )
 
@@ -76,7 +76,7 @@ func (r *Registry) Register(t Tool) error {
 	return nil
 }
 
-// MustRegister panics on error. Use only at startup with built-in tools.
+// MustRegister panics on error. Use only at startup with built-in 
 func (r *Registry) MustRegister(t Tool) {
 	if err := r.Register(t); err != nil {
 		panic(err)
@@ -135,23 +135,25 @@ func (r *Registry) Validate() error {
 	return nil
 }
 
-// BuiltIn returns a registry pre-populated with the canonical tools:
-//   - bash, write           (base)
-//   - read, glob, task      (composite)
-//   - memory                (third-level: composite-of-composites; uses read + write)
+// BuiltIn returns the global registry, populated by each tool file's init()
+// at program load. Adding a new tool is just dropping a *.go file in this
+// directory whose init() calls Register(). Validate runs once.
 func BuiltIn() *Registry {
-	r := NewRegistry()
-	// Base
-	r.MustRegister(BashTool{})
-	r.MustRegister(WriteTool{})
-	// Composite
-	r.MustRegister(ReadTool{})
-	r.MustRegister(GlobTool{})
-	r.MustRegister(TaskTool{})
-	// Third level (uses other composites)
-	r.MustRegister(MemoryTool{})
-	if err := r.Validate(); err != nil {
-		panic(err)
-	}
-	return r
+	validateOnce.Do(func() {
+		if err := defaultRegistry.Validate(); err != nil {
+			panic(err)
+		}
+	})
+	return defaultRegistry
 }
+
+// Register is the package-level helper each tool file's init() uses.
+// Panics on duplicate names — that's a programmer error.
+func Register(t Tool) {
+	defaultRegistry.MustRegister(t)
+}
+
+var (
+	defaultRegistry = NewRegistry()
+	validateOnce    sync.Once
+)

@@ -1,4 +1,4 @@
-package agent
+package cli
 
 import (
 	"context"
@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arcaela/mini-cli/internal/provider"
-	"github.com/arcaela/mini-cli/internal/tools"
+	"github.com/arcaela/mini-cli/provider"
+	"github.com/arcaela/mini-cli/funcs"
 )
 
 // fakeProvider lets tests script the events for each call to Generate. The
@@ -105,7 +105,7 @@ func TestAgent_TextOnlyTurn(t *testing.T) {
 			},
 		},
 	}
-	a := &Agent{Provider: prov, Tools: tools.BuiltIn(), Model: "fake-1"}
+	a := &Agent{Provider: prov, Tools: funcs.BuiltIn(), Model: "fake-1"}
 	sink := &recordingSink{}
 	hist, err := a.Run(context.Background(), nil, "hi", sink)
 	if err != nil {
@@ -147,7 +147,7 @@ func TestAgent_ToolCallRoundtrip(t *testing.T) {
 			},
 		},
 	}
-	a := &Agent{Provider: prov, Tools: tools.BuiltIn(), Model: "fake-1"}
+	a := &Agent{Provider: prov, Tools: funcs.BuiltIn(), Model: "fake-1"}
 	sink := &recordingSink{}
 	hist, err := a.Run(context.Background(), nil, "do it", sink)
 	if err != nil {
@@ -204,7 +204,7 @@ func TestAgent_ProviderError(t *testing.T) {
 			},
 		},
 	}
-	a := &Agent{Provider: prov, Tools: tools.BuiltIn(), Model: "fake-1"}
+	a := &Agent{Provider: prov, Tools: funcs.BuiltIn(), Model: "fake-1"}
 	sink := &recordingSink{}
 	_, err := a.Run(context.Background(), nil, "hi", sink)
 	if err == nil || err.Error() != "rate-limited" {
@@ -239,7 +239,7 @@ func TestAgent_MaxStepsCap(t *testing.T) {
 		name:  "fake",
 		turns: [][]provider.Event{loopTurn, loopTurn, loopTurn, loopTurn},
 	}
-	a := &Agent{Provider: prov, Tools: tools.BuiltIn(), Model: "fake-1", MaxSteps: 3}
+	a := &Agent{Provider: prov, Tools: funcs.BuiltIn(), Model: "fake-1", MaxSteps: 3}
 	sink := &recordingSink{}
 	_, err := a.Run(context.Background(), nil, "loop", sink)
 	if err == nil || !strings.Contains(err.Error(), "max steps") {
@@ -287,7 +287,7 @@ func TestAgent_ParallelToolExecution(t *testing.T) {
 	}
 	a := &Agent{
 		Provider:    prov,
-		Tools:       tools.BuiltIn(),
+		Tools:       funcs.BuiltIn(),
 		Model:       "fake-1",
 		MaxParallel: N,
 	}
@@ -362,7 +362,7 @@ func TestAgent_OneToolFailureDoesNotCancelOthers(t *testing.T) {
 			},
 		},
 	}
-	a := &Agent{Provider: prov, Tools: tools.BuiltIn(), Model: "fake-1"}
+	a := &Agent{Provider: prov, Tools: funcs.BuiltIn(), Model: "fake-1"}
 	sink := &recordingSink{}
 	hist, err := a.Run(context.Background(), nil, "x", sink)
 	if err != nil {
@@ -401,7 +401,7 @@ func TestAgent_ForwardsToolDecls(t *testing.T) {
 			},
 		},
 	}
-	a := &Agent{Provider: prov, Tools: tools.BuiltIn(), Model: "fake-1"}
+	a := &Agent{Provider: prov, Tools: funcs.BuiltIn(), Model: "fake-1"}
 	if _, err := a.Run(context.Background(), nil, "x", &recordingSink{}); err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +409,7 @@ func TestAgent_ForwardsToolDecls(t *testing.T) {
 	for _, d := range prov.lastReq.Tools {
 		names = append(names, d.Name)
 	}
-	want := []string{"bash", "glob", "memory", "read", "task", "write"}
+	want := []string{"bash", "bash_input", "bash_output", "glob", "memory", "read", "task", "web_fetch", "web_search", "write"}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("tool decls forwarded wrong:\n got: %v\nwant: %v", names, want)
 	}

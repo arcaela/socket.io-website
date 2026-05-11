@@ -1,4 +1,4 @@
-package tools
+package funcs
 
 import (
 	"context"
@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -15,10 +14,10 @@ import (
 
 func TestRegistry_RegisterAndDuplicate(t *testing.T) {
 	r := NewRegistry()
-	if err := r.Register(BashTool{}); err != nil {
+	if err := r.Register(bashTool{}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := r.Register(BashTool{}); err == nil {
+	if err := r.Register(bashTool{}); err == nil {
 		t.Fatal("expected duplicate registration to error")
 	}
 	if !r.Has("bash") {
@@ -31,7 +30,7 @@ func TestRegistry_BuiltInValidates(t *testing.T) {
 	if err := r.Validate(); err != nil {
 		t.Fatalf("BuiltIn registry failed validation: %v", err)
 	}
-	expected := []string{"bash", "glob", "memory", "read", "task", "write"}
+	expected := []string{"bash", "bash_input", "bash_output", "glob", "memory", "read", "task", "web_fetch", "web_search", "write"}
 	got := []string{}
 	for _, tl := range r.List() {
 		got = append(got, tl.Name())
@@ -141,22 +140,6 @@ func TestBash_ContextCancellation(t *testing.T) {
 	}
 }
 
-func TestBash_TimeoutAndBackgroundMutuallyExclusive(t *testing.T) {
-	t.Setenv("MINI_JOBS_DIR", t.TempDir())
-	r := BuiltIn()
-	_, err := r.Call(context.Background(), "bash", map[string]any{
-		"command":         "true",
-		"description":     "should fail validation",
-		"background":      true,
-		"timeout_seconds": 5,
-	})
-	if err == nil {
-		t.Fatal("expected error: cannot combine timeout and background")
-	}
-	if !strings.Contains(err.Error(), "cannot combine") {
-		t.Errorf("wrong error message: %v", err)
-	}
-}
 
 func TestBash_TimeoutZeroMeansNoTimeout(t *testing.T) {
 	r := BuiltIn()
@@ -198,82 +181,8 @@ func TestBash_TimeoutHonored(t *testing.T) {
 
 // ---------- BashTool background mode ----------
 
-func TestBash_BackgroundReturnsImmediately(t *testing.T) {
-	t.Setenv("MINI_JOBS_DIR", t.TempDir())
-	r := BuiltIn()
-	start := time.Now()
-	out, err := r.Call(context.Background(), "bash", map[string]any{
-		"command":     "sleep 5",
-		"description": "long sleep, should not block",
-		"background":  true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if time.Since(start) > 500*time.Millisecond {
-		t.Fatalf("background should return immediately")
-	}
-	res := out.(BashResult)
-	if !res.Background || res.JobID == "" || res.LogFile == "" || res.PID == 0 {
-		t.Fatalf("missing background fields: %+v", res)
-	}
-	_ = syscall.Kill(-res.PID, syscall.SIGKILL)
-}
 
-func TestBash_BackgroundWritesExitMarker(t *testing.T) {
-	t.Setenv("MINI_JOBS_DIR", t.TempDir())
-	r := BuiltIn()
-	out, err := r.Call(context.Background(), "bash", map[string]any{
-		"command":     `echo first; sleep 0.1; echo second`,
-		"description": "two-step bg",
-		"background":  true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	res := out.(BashResult)
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		data, _ := os.ReadFile(res.LogFile)
-		if strings.Contains(string(data), "exit_code=0") {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	body, _ := os.ReadFile(res.LogFile)
-	for _, want := range []string{"first", "second", "exit_code=0", "exited at"} {
-		if !strings.Contains(string(body), want) {
-			t.Errorf("log missing %q. body=%q", want, string(body))
-		}
-	}
-}
 
-func TestBash_BackgroundSurvivesContextCancel(t *testing.T) {
-	t.Setenv("MINI_JOBS_DIR", t.TempDir())
-	r := BuiltIn()
-	ctx, cancel := context.WithCancel(context.Background())
-	out, err := r.Call(ctx, "bash", map[string]any{
-		"command":     `sleep 0.3; echo survived`,
-		"description": "prove detachment",
-		"background":  true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	res := out.(BashResult)
-	cancel()
-
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		data, _ := os.ReadFile(res.LogFile)
-		if strings.Contains(string(data), "survived") {
-			return
-		}
-		time.Sleep(80 * time.Millisecond)
-	}
-	body, _ := os.ReadFile(res.LogFile)
-	t.Fatalf("background process did not survive cancel; log=%q", string(body))
-}
 
 // ---------- WriteTool (base) ----------
 
@@ -367,7 +276,7 @@ func TestWrite_ErrorsWhenAnchorNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when anchor not in file")
 	}
-	if !strings.Contains(err.Error(), "Read the file first") {
+	if !strings.Contains(err.Error(), "read the file") {
 		t.Errorf("error should ask agent to read first; got: %v", err)
 	}
 	got, _ := os.ReadFile(path)
@@ -860,97 +769,17 @@ func TestTask_DelegatesToBashWithMiniChat(t *testing.T) {
 	if !strings.Contains(desc, "Sub-agent") {
 		t.Errorf("description should mark this as a sub-agent task: %s", desc)
 	}
-	if rc.calls[0].args["background"] != false {
-		t.Errorf("default background should be false")
+	// The new task tool routes default (background=false) to `bash`, not
+	// to bash with background:false. Verify it called bash (not bash_input).
+	if rc.calls[0].name != "bash" {
+		t.Errorf("foreground task should call bash, got: %s", rc.calls[0].name)
 	}
 }
 
-func TestTask_ForwardsBackgroundFlag(t *testing.T) {
-	r := BuiltIn()
-	rc := &recordingCaller{inner: r, intercept: map[string]any{
-		"bash": BashResult{Background: true, JobID: "stub", LogFile: "/tmp/stub.log"},
-	}}
-	tk, _ := r.Get("task")
-	_, err := tk.Execute(context.Background(), map[string]any{
-		"prompt":     "long running",
-		"background": true,
-	}, rc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rc.calls[0].args["background"] != true {
-		t.Fatalf("background flag not forwarded: %+v", rc.calls[0].args)
-	}
-}
 
 // ---------- Process tracker / shutdown ----------
 
-func TestTracker_KillsBackgroundOnShutdown(t *testing.T) {
-	t.Setenv("MINI_JOBS_DIR", t.TempDir())
-	bgTracker.resetForTesting()
-	t.Cleanup(bgTracker.resetForTesting)
 
-	r := BuiltIn()
-
-	// Spawn 3 long-running bg processes. None should survive ShutdownBackgroundJobs.
-	pids := []int{}
-	for i := 0; i < 3; i++ {
-		out, err := r.Call(context.Background(), "bash", map[string]any{
-			"command":     "sleep 30",
-			"description": fmt.Sprintf("long sleep %d", i),
-			"background":  true,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		pids = append(pids, out.(BashResult).PID)
-	}
-	if got := TrackedJobCount(); got != 3 {
-		t.Fatalf("expected 3 tracked jobs, got %d", got)
-	}
-
-	killed := ShutdownBackgroundJobs(2 * time.Second)
-	if killed != 3 {
-		t.Fatalf("expected 3 killed, got %d", killed)
-	}
-
-	// Verify all PIDs are dead now.
-	for _, pid := range pids {
-		err := syscall.Kill(pid, 0)
-		if err == nil {
-			t.Errorf("PID %d still alive after shutdown", pid)
-		}
-	}
-}
-
-func TestTracker_UntrackOnNaturalExit(t *testing.T) {
-	t.Setenv("MINI_JOBS_DIR", t.TempDir())
-	bgTracker.resetForTesting()
-	t.Cleanup(bgTracker.resetForTesting)
-
-	r := BuiltIn()
-	out, err := r.Call(context.Background(), "bash", map[string]any{
-		"command":     "true", // exits immediately
-		"description": "instant exit",
-		"background":  true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	res := out.(BashResult)
-
-	// Wait for the reaper goroutine to untrack.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if TrackedJobCount() == 0 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if got := TrackedJobCount(); got != 0 {
-		t.Fatalf("expected tracker to be empty after natural exit, still has %d (PID=%d)", got, res.PID)
-	}
-}
 
 // ---------- TaskTool: foreground passes timeout=0 ----------
 
@@ -978,25 +807,6 @@ func TestTask_ForegroundPassesNoTimeout(t *testing.T) {
 	}
 }
 
-func TestTask_BackgroundOmitsTimeout(t *testing.T) {
-	r := BuiltIn()
-	rc := &recordingCaller{inner: r, intercept: map[string]any{
-		"bash": BashResult{Background: true, JobID: "stub", LogFile: "/tmp/x"},
-	}}
-	tk, _ := r.Get("task")
-	_, err := tk.Execute(context.Background(), map[string]any{
-		"prompt":     "bg task",
-		"background": true,
-	}, rc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// background tasks must NOT include timeout_seconds (would trip the
-	// mutual-exclusion check on the real bash tool).
-	if _, present := rc.calls[0].args["timeout_seconds"]; present {
-		t.Fatal("background task must not pass timeout_seconds")
-	}
-}
 
 // ---------- Composition guarantee: composites really go via Caller ----------
 

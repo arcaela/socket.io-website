@@ -1,4 +1,4 @@
-package wire
+package gemini
 
 import (
 	"bufio"
@@ -137,7 +137,7 @@ type Client struct {
 	AccessToken string
 }
 
-func New(accessToken string) *Client {
+func newClient(accessToken string) *Client {
 	return &Client{
 		HTTP:        &http.Client{Timeout: 0}, // no timeout: streaming
 		AccessToken: accessToken,
