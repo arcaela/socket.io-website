@@ -18,8 +18,9 @@ import (
 
 	"github.com/arcaela/mini-cli/config"
 	"github.com/arcaela/mini-cli/cli"
-	"github.com/arcaela/mini-cli/provider"
 	"github.com/arcaela/mini-cli/funcs"
+	"github.com/arcaela/mini-cli/mcp"
+	"github.com/arcaela/mini-cli/provider"
 
 	// Blank-import the providers we ship so their init() runs and they
 	// self-register with the provider registry. To add another backend, add
@@ -175,6 +176,14 @@ func runWhoami(ctx context.Context) error {
 // ---------------- tools ----------------
 
 func runTools(ctx context.Context, args []string) error {
+	// Load MCP servers so `mini tools` reflects everything an agent run
+	// would see. Their lifecycles are bound to this subcommand only.
+	mcpClients, _ := mcp.RegisterAll(ctx)
+	defer func() {
+		for _, c := range mcpClients {
+			_ = c.Close()
+		}
+	}()
 	reg := funcs.BuiltIn()
 	sub := ""
 	if len(args) > 0 {
@@ -241,6 +250,15 @@ func runChat(ctx context.Context, args []string) error {
 	if !ok {
 		return fmt.Errorf("unknown provider %q (registered: %v)", providerName, provider.List())
 	}
+
+	// Load MCP servers (if ~/.mini/mcp.json exists) and register their tools.
+	// Failure to start any one server is logged, not fatal.
+	mcpClients, _ := mcp.RegisterAll(ctx)
+	defer func() {
+		for _, c := range mcpClients {
+			_ = c.Close()
+		}
+	}()
 
 	model := getEnv("MINI_MODEL", f.DefaultModel)
 	maxSteps := envInt("MINI_MAX_STEPS", 25)
