@@ -177,9 +177,16 @@ func (a *Agent) Run(
 				ToolResult: &r,
 			})
 		}
+
+		// Mid-turn compaction: a turn with many tool-calling steps can grow
+		// the prompt past the context window before the turn ever ends. If the
+		// last request already exceeded the threshold and the model wants to
+		// keep going, summarise now so the NEXT request in this same turn fits.
+		// maybeCompact is a no-op below threshold or without a compactor.
+		history = a.maybeCompact(ctx, history, lastUsage, sink)
 	}
 
-	err := fmt.Errorf("agent: max steps (%d) reached without final answer", maxSteps)
+	err := fmt.Errorf("%w (limit %d)", SentinelMaxSteps, maxSteps)
 	sink.OnError(err)
 	return history, err
 }
@@ -207,8 +214,16 @@ func (a *Agent) maybeCompact(ctx context.Context, history []provider.Message, la
 		return history
 	}
 
-	toCompact := history[:len(history)-keep]
-	tail := append([]provider.Message{}, history[len(history)-keep:]...)
+	// Snap the split point to a clean boundary so we never summarise away a
+	// tool_call while keeping its tool_result verbatim (an orphan pair that
+	// OpenAI and Anthropic reject). If no clean boundary exists — e.g. one
+	// huge in-flight tool block — skip this round and try again next step.
+	split := safeCompactBoundary(history, keep)
+	if split < 1 {
+		return history
+	}
+	toCompact := history[:split]
+	tail := append([]provider.Message{}, history[split:]...)
 
 	summary, err := a.Compactor.Compact(ctx, toCompact)
 	if err != nil || strings.TrimSpace(summary) == "" {
@@ -226,6 +241,35 @@ func (a *Agent) maybeCompact(ctx context.Context, history []provider.Message, la
 			Text: "[compacted earlier history; verbatim turns continue below]\n" + summary,
 		},
 	}, tail...)
+}
+
+// safeCompactBoundary returns the index at which to split history into a
+// summarised prefix (history[:idx]) and a verbatim tail (history[idx:]).
+// It starts from len-keep and snaps BACKWARD until the tail begins on a clean
+// boundary, so compaction never separates a tool_result from the tool_call it
+// answers. Returns 0 (or less) when no clean boundary exists below len-keep,
+// signalling the caller to skip compaction this round.
+func safeCompactBoundary(history []provider.Message, keep int) int {
+	idx := len(history) - keep
+	for idx > 0 && !isCleanBoundary(history[idx]) {
+		idx--
+	}
+	return idx
+}
+
+// isCleanBoundary reports whether a message can safely START a verbatim tail —
+// i.e. it does not depend on an earlier message to be valid. A tool_result
+// depends on its tool_call; an assistant tool_call may be the middle of a
+// multi-call block whose siblings would be summarised away. Plain user,
+// assistant-text and system messages are always safe.
+func isCleanBoundary(m provider.Message) bool {
+	if m.ToolResult != nil {
+		return false
+	}
+	if m.Role == provider.RoleAssistant && m.ToolCall != nil {
+		return false
+	}
+	return true
 }
 
 // executeToolsParallel runs tool calls concurrently with a bounded semaphore.
@@ -337,8 +381,10 @@ func PrettyJSON(v any) string {
 	return string(b)
 }
 
-// SentinelMaxSteps lets callers detect the specific reason without parsing strings.
-var SentinelMaxSteps = errors.New("agent: max steps reached")
+// SentinelMaxSteps lets callers detect the specific reason without parsing
+// strings: the error returned when the step cap is hit wraps it, so
+// errors.Is(err, SentinelMaxSteps) is true.
+var SentinelMaxSteps = errors.New("agent: max steps reached without final answer")
 
 // noopSink is used when callers pass nil.
 type noopSink struct{}

@@ -250,6 +250,24 @@ func TestAgent_MaxStepsCap(t *testing.T) {
 	}
 }
 
+// TestAgent_MaxStepsWrapsSentinel verifies the step-cap error wraps the
+// exported sentinel so callers can detect it with errors.Is instead of
+// string matching.
+func TestAgent_MaxStepsWrapsSentinel(t *testing.T) {
+	loopTurn := []provider.Event{
+		{Kind: provider.EventToolCallRequest, ToolCall: &provider.ToolCall{
+			ID: "c", Name: "bash", Args: map[string]any{"command": "true", "description": "loop"},
+		}},
+		{Kind: provider.EventTurnDone},
+	}
+	prov := &fakeProvider{name: "fake", turns: [][]provider.Event{loopTurn, loopTurn}}
+	a := &Agent{Provider: prov, Tools: funcs.BuiltIn(), Model: "fake-1", MaxSteps: 2}
+	_, err := a.Run(context.Background(), nil, "loop", &recordingSink{})
+	if !errors.Is(err, SentinelMaxSteps) {
+		t.Fatalf("expected errors.Is(err, SentinelMaxSteps), got %v", err)
+	}
+}
+
 // ----- Test: parallel tool execution -----
 
 // TestAgent_ParallelToolExecution verifies that when the model emits multiple

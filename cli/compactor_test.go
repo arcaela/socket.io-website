@@ -129,6 +129,55 @@ func TestMaybeCompact_TooShortForKeep(t *testing.T) {
 	}
 }
 
+// TestMaybeCompact_SnapsBoundaryToAvoidOrphanedToolResult checks that when the
+// keep-window would start the verbatim tail on a tool_result, the split snaps
+// back to a clean turn boundary so the tool_call and its result stay together
+// (an orphaned tool_result would be rejected by OpenAI/Anthropic).
+func TestMaybeCompact_SnapsBoundaryToAvoidOrphanedToolResult(t *testing.T) {
+	sc := &stubCompactor{summary: "summary"}
+	a := &Agent{Compactor: sc, CompactThreshold: 100, CompactKeepRecent: 2}
+	history := []provider.Message{
+		{Role: provider.RoleUser, Text: "first"},
+		{Role: provider.RoleAssistant, Text: "answer one"},
+		{Role: provider.RoleUser, Text: "second"},
+		{Role: provider.RoleAssistant, ToolCall: &provider.ToolCall{ID: "1", Name: "bash"}},
+		{Role: provider.RoleTool, ToolResult: &provider.ToolResult{CallID: "1", Name: "bash", Result: "ok"}},
+		{Role: provider.RoleAssistant, Text: "done"},
+	}
+	out := a.maybeCompact(context.Background(), history, &provider.Usage{PromptTokens: 500}, &recordingSink2{})
+
+	// keep=2 would split at index 4 (the tool_result); the boundary must snap
+	// back to "second" (index 2), so 2 messages are summarised and 4 kept.
+	if len(sc.seen) != 2 {
+		t.Fatalf("expected 2 messages summarised, got %d", len(sc.seen))
+	}
+	if len(out) != 5 {
+		t.Fatalf("expected 1 summary + 4 verbatim = 5, got %d", len(out))
+	}
+	if out[0].Role != provider.RoleSystem {
+		t.Fatalf("first message should be the summary, got %+v", out[0])
+	}
+	// No tool_result may appear without its tool_call immediately before it.
+	for i, m := range out {
+		if m.ToolResult != nil && (i == 0 || out[i-1].ToolCall == nil) {
+			t.Fatalf("orphaned tool_result at index %d", i)
+		}
+	}
+}
+
+func TestSafeCompactBoundary_NoCleanBoundaryReturnsZero(t *testing.T) {
+	history := []provider.Message{
+		{Role: provider.RoleUser, Text: "go"},
+		{Role: provider.RoleAssistant, ToolCall: &provider.ToolCall{ID: "1", Name: "bash"}},
+		{Role: provider.RoleTool, ToolResult: &provider.ToolResult{CallID: "1", Name: "bash"}},
+	}
+	// keep=1 starts at the tool_result; snapping back passes the tool_call and
+	// lands on the user turn (index 0) → returns 0, signalling "skip".
+	if got := safeCompactBoundary(history, 1); got != 0 {
+		t.Fatalf("expected boundary 0 (skip), got %d", got)
+	}
+}
+
 // =============================================================================
 // ProviderCompactor uses the provider end-to-end. Stub the provider so we can
 // assert on what gets sent and on the assembled summary.
