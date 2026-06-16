@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -88,11 +89,11 @@ func (p *Provider) Account(_ context.Context) (*provider.AccountInfo, error) {
 // =============================================================================
 
 type chatMessage struct {
-	Role       string             `json:"role"`           // system | user | assistant | tool
-	Content    string             `json:"content,omitempty"`
-	Name       string             `json:"name,omitempty"` // for role=tool: the tool name
-	ToolCalls  []chatToolCall     `json:"tool_calls,omitempty"`
-	ToolCallID string             `json:"tool_call_id,omitempty"`
+	Role       string         `json:"role"`              // system | user | assistant | tool
+	Content    any            `json:"content,omitempty"` // string, or []part for multimodal user turns
+	Name       string         `json:"name,omitempty"`    // for role=tool: the tool name
+	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
 }
 
 type chatToolCall struct {
@@ -296,6 +297,11 @@ func messagesToChat(msgs []provider.Message) []chatMessage {
 				ToolCallID: m.ToolResult.CallID,
 				Content:    content,
 			})
+			// OpenAI tool messages are text-only, so any images ride in a
+			// follow-up user turn as image_url data parts.
+			if parts := imagePartsToChat(m.ToolResult.Images); parts != nil {
+				out = append(out, chatMessage{Role: "user", Content: parts})
+			}
 		default:
 			role := string(m.Role)
 			switch role {
@@ -308,6 +314,22 @@ func messagesToChat(msgs []provider.Message) []chatMessage {
 		}
 	}
 	return out
+}
+
+// imagePartsToChat renders provider images as OpenAI image_url content parts
+// (base64 data URLs). Returns nil when there are no images.
+func imagePartsToChat(images []provider.Image) []map[string]any {
+	if len(images) == 0 {
+		return nil
+	}
+	parts := make([]map[string]any, 0, len(images))
+	for _, img := range images {
+		parts = append(parts, map[string]any{
+			"type":      "image_url",
+			"image_url": map[string]any{"url": "data:" + img.MimeType + ";base64," + base64.StdEncoding.EncodeToString(img.Data)},
+		})
+	}
+	return parts
 }
 
 func toolsToChat(tools []provider.ToolDecl) []chatToolDecl {

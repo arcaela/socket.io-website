@@ -75,8 +75,8 @@ func TestMessagesToChat_ToolResult(t *testing.T) {
 	if out[0].ToolCallID != "call_1" {
 		t.Errorf("missing tool_call_id: %+v", out[0])
 	}
-	if !strings.Contains(out[0].Content, `"stdout":"hi"`) {
-		t.Errorf("result body not serialised: %s", out[0].Content)
+	if c, _ := out[0].Content.(string); !strings.Contains(c, `"stdout":"hi"`) {
+		t.Errorf("result body not serialised: %v", out[0].Content)
 	}
 }
 
@@ -84,8 +84,31 @@ func TestMessagesToChat_ToolResultError(t *testing.T) {
 	out := messagesToChat([]provider.Message{
 		{Role: provider.RoleTool, ToolResult: &provider.ToolResult{Name: "bash", Error: "perm"}},
 	})
-	if !strings.HasPrefix(out[0].Content, "error: ") {
-		t.Fatalf("error not surfaced: %q", out[0].Content)
+	if c, _ := out[0].Content.(string); !strings.HasPrefix(c, "error: ") {
+		t.Fatalf("error not surfaced: %v", out[0].Content)
+	}
+}
+
+func TestMessagesToChat_ToolResultWithImageAddsUserTurn(t *testing.T) {
+	out := messagesToChat([]provider.Message{
+		{Role: provider.RoleTool, ToolResult: &provider.ToolResult{
+			CallID: "call_1", Name: "read", Result: map[string]any{"kind": "image"},
+			Images: []provider.Image{{MimeType: "image/png", Data: []byte{1, 2, 3}}},
+		}},
+	})
+	if len(out) != 2 {
+		t.Fatalf("expected tool message + user image message, got %d", len(out))
+	}
+	if out[1].Role != "user" {
+		t.Fatalf("image must ride in a user turn, got %q", out[1].Role)
+	}
+	parts, ok := out[1].Content.([]map[string]any)
+	if !ok || len(parts) != 1 || parts[0]["type"] != "image_url" {
+		t.Fatalf("bad image parts: %#v", out[1].Content)
+	}
+	url, _ := parts[0]["image_url"].(map[string]any)
+	if url["url"] != "data:image/png;base64,AQID" {
+		t.Fatalf("bad data url: %#v", url)
 	}
 }
 

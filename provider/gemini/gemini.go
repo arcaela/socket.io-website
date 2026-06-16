@@ -5,6 +5,7 @@ package gemini
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -164,12 +165,21 @@ func messagesToContents(msgs []provider.Message) ([]Content, *Content, error) {
 			} else {
 				respPayload["result"] = m.ToolResult.Result
 			}
-			c.Parts = []Part{{
+			// The functionResponse plus any images the tool emitted, all in one
+			// user Content so Gemini sees the result and the image together.
+			parts := []Part{{
 				FunctionResponse: map[string]any{
 					"name":     m.ToolResult.Name,
 					"response": respPayload,
 				},
 			}}
+			for _, img := range m.ToolResult.Images {
+				parts = append(parts, Part{InlineData: &InlineData{
+					MimeType: img.MimeType,
+					Data:     base64.StdEncoding.EncodeToString(img.Data),
+				}})
+			}
+			c.Parts = parts
 		default:
 			c.Parts = []Part{{Text: m.Text}}
 		}

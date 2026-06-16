@@ -74,11 +74,19 @@ type UserInfo struct {
 // Generate request/response
 
 type Part struct {
-	Text             string                 `json:"text,omitempty"`
-	FunctionCall     map[string]any         `json:"functionCall,omitempty"`
-	FunctionResponse map[string]any         `json:"functionResponse,omitempty"`
-	Thought          bool                   `json:"thought,omitempty"`
-	Extra            map[string]any         `json:"-"`
+	Text             string         `json:"text,omitempty"`
+	FunctionCall     map[string]any `json:"functionCall,omitempty"`
+	FunctionResponse map[string]any `json:"functionResponse,omitempty"`
+	InlineData       *InlineData    `json:"inlineData,omitempty"`
+	Thought          bool           `json:"thought,omitempty"`
+	Extra            map[string]any `json:"-"`
+}
+
+// InlineData is Gemini's shape for embedded binary (e.g. an image) in a Part.
+// Data is base64-encoded.
+type InlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
 }
 
 type Content struct {

@@ -37,6 +37,19 @@ type ToolResult struct {
 	Name   string `json:"name"`
 	Result any    `json:"result,omitempty"`
 	Error  string `json:"error,omitempty"`
+
+	// Images carries any image(s) a tool wants the model to actually SEE
+	// (e.g. `read` on a PNG). The wire layer in each provider renders these
+	// as native image content; they are not part of the JSON `Result` text.
+	// Excluded from JSON so saved sessions stay text-only (re-read to refetch).
+	Images []Image `json:"-"`
+}
+
+// Image is raw image bytes plus their MIME type. Providers base64-encode the
+// data into whatever multimodal shape their API expects.
+type Image struct {
+	MimeType string
+	Data     []byte
 }
 
 // ToolDecl is what we pass to the provider so the model can call tools.

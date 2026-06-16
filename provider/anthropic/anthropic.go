@@ -16,6 +16,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -104,11 +105,11 @@ type contentBlock struct {
 	Input map[string]any `json:"input,omitempty"`
 
 	// type=tool_result
-	ToolUseID string         `json:"tool_use_id,omitempty"`
-	IsError   bool           `json:"is_error,omitempty"`
-	// `content` of a tool_result can be a string OR an array. We always emit
-	// strings; the inbound shape doesn't matter (we never read it back).
-	ResultText string `json:"content,omitempty"`
+	ToolUseID string `json:"tool_use_id,omitempty"`
+	IsError   bool   `json:"is_error,omitempty"`
+	// `content` of a tool_result is a string for plain results, or an array of
+	// blocks ([{text},{image}]) when the tool attached images for the model.
+	Content any `json:"content,omitempty"`
 }
 
 type apiToolDecl struct {
@@ -326,13 +327,29 @@ func messagesToAnthropic(msgs []provider.Message) (string, []apiMessage) {
 				b, _ := json.Marshal(m.ToolResult.Result)
 				text = string(b)
 			}
+			// Anthropic embeds images directly in the tool_result content array.
+			var blockContent any = text
+			if len(m.ToolResult.Images) > 0 {
+				arr := []map[string]any{{"type": "text", "text": text}}
+				for _, img := range m.ToolResult.Images {
+					arr = append(arr, map[string]any{
+						"type": "image",
+						"source": map[string]any{
+							"type":       "base64",
+							"media_type": img.MimeType,
+							"data":       base64.StdEncoding.EncodeToString(img.Data),
+						},
+					})
+				}
+				blockContent = arr
+			}
 			out = append(out, apiMessage{
 				Role: "user", // tool_result blocks live inside user turns
 				Content: []contentBlock{{
-					Type:       "tool_result",
-					ToolUseID:  m.ToolResult.CallID,
-					IsError:    m.ToolResult.Error != "",
-					ResultText: text,
+					Type:      "tool_result",
+					ToolUseID: m.ToolResult.CallID,
+					IsError:   m.ToolResult.Error != "",
+					Content:   blockContent,
 				}},
 			})
 		default:

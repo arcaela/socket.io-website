@@ -81,8 +81,30 @@ func TestMessagesToAnthropic_ToolResultError(t *testing.T) {
 	if !b.IsError {
 		t.Error("is_error should be true on error result")
 	}
-	if !strings.HasPrefix(b.ResultText, "error: ") {
-		t.Errorf("body wrong: %q", b.ResultText)
+	text, _ := b.Content.(string)
+	if !strings.HasPrefix(text, "error: ") {
+		t.Errorf("body wrong: %q", b.Content)
+	}
+}
+
+func TestMessagesToAnthropic_ToolResultWithImage(t *testing.T) {
+	_, msgs := messagesToAnthropic([]provider.Message{
+		{Role: provider.RoleTool, ToolResult: &provider.ToolResult{
+			CallID: "use_1", Name: "read", Result: map[string]any{"kind": "image"},
+			Images: []provider.Image{{MimeType: "image/png", Data: []byte{1, 2, 3}}},
+		}},
+	})
+	block := msgs[0].Content[0]
+	arr, ok := block.Content.([]map[string]any)
+	if !ok || len(arr) != 2 {
+		t.Fatalf("expected [text, image] content array, got %#v", block.Content)
+	}
+	if arr[0]["type"] != "text" || arr[1]["type"] != "image" {
+		t.Fatalf("bad content blocks: %#v", arr)
+	}
+	src, _ := arr[1]["source"].(map[string]any)
+	if src["media_type"] != "image/png" || src["data"] != "AQID" {
+		t.Fatalf("bad image source: %#v", src)
 	}
 }
 

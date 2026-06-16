@@ -346,6 +346,13 @@ func (a *Agent) executeToolsParallel(
 				tr.Error = err.Error()
 			} else {
 				tr.Result = out
+				// If the tool produced image(s), carry them as model-visible
+				// content so providers can render them as native image parts.
+				if ip, ok := out.(funcs.ImageProducer); ok {
+					for _, im := range ip.ToolImages() {
+						tr.Images = append(tr.Images, provider.Image{MimeType: im.MimeType, Data: im.Data})
+					}
+				}
 			}
 			results[i] = tr
 			sink.OnToolResult(tr)

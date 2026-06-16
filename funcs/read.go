@@ -3,6 +3,7 @@ package funcs
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -29,7 +30,8 @@ func (ReadTool) DependsOn() []string  { return []string{"bash"} }
 func (ReadTool) Description() string {
 	return "Read a range of lines from a file. Returns the content with each line prefixed by its 1-indexed line number, " +
 		"so the agent has explicit positional context. Backed by `bash` (cat/awk). " +
-		"If `start` and `end` are omitted, reads the first 2000 lines."
+		"If `start` and `end` are omitted, reads the first 2000 lines. " +
+		"If the file is an image (png/jpg/jpeg/gif/webp/bmp), it is loaded as viewable image content instead."
 }
 
 func (ReadTool) Schema() map[string]any {
@@ -71,11 +73,48 @@ type ReadResult struct {
 	Content    string `json:"content"`
 }
 
+// ImageReadResult is what `read` returns for an image file. The bytes ride in
+// the unexported `data` field (kept out of JSON) and reach the model as native
+// image content via ToolImages; the JSON fields just describe what was loaded.
+type ImageReadResult struct {
+	Path     string `json:"path"`
+	Kind     string `json:"kind"` // always "image"
+	MimeType string `json:"mime_type"`
+	Bytes    int    `json:"bytes"`
+	Note     string `json:"note"`
+	data     []byte
+}
+
+func (r ImageReadResult) ToolImages() []ToolImage {
+	return []ToolImage{{MimeType: r.MimeType, Data: r.data}}
+}
+
 func (ReadTool) Execute(ctx context.Context, args map[string]any, c Caller) (any, error) {
 	path, err := argRequiredString(args, "path")
 	if err != nil {
 		return nil, err
 	}
+
+	// Images can't be line-numbered text — detect them up front and return the
+	// raw bytes as model-visible content instead of running awk over binary.
+	if mime, ok := imageMIME(path); ok {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read image %s: %w", path, err)
+		}
+		if len(data) > maxImageBytes {
+			return nil, fmt.Errorf("image %s is %d bytes, over the %d-byte inline cap", path, len(data), maxImageBytes)
+		}
+		return ImageReadResult{
+			Path:     path,
+			Kind:     "image",
+			MimeType: mime,
+			Bytes:    len(data),
+			Note:     "image content attached for the model to view",
+			data:     data,
+		}, nil
+	}
+
 	start, err := argInt(args, "start", 1)
 	if err != nil {
 		return nil, err

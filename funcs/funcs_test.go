@@ -367,6 +367,32 @@ func TestWrite_DryRunIsLowRisk(t *testing.T) {
 	}
 }
 
+func TestRead_DetectsImageAndAttachesIt(t *testing.T) {
+	r := BuiltIn()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pixel.png")
+	// A tiny but valid-enough byte blob; detection is by extension.
+	raw := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := r.Call(context.Background(), "read", map[string]any{"path": path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, ok := out.(ImageReadResult)
+	if !ok {
+		t.Fatalf("expected ImageReadResult, got %T", out)
+	}
+	if res.Kind != "image" || res.MimeType != "image/png" || res.Bytes != len(raw) {
+		t.Fatalf("bad image result: %+v", res)
+	}
+	imgs := res.ToolImages()
+	if len(imgs) != 1 || imgs[0].MimeType != "image/png" || len(imgs[0].Data) != len(raw) {
+		t.Fatalf("ToolImages wrong: %+v", imgs)
+	}
+}
+
 // ---------- ReadTool (composite) ----------
 
 func TestRead_FullFileWithLineNumbers(t *testing.T) {
