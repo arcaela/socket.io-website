@@ -58,7 +58,10 @@ func (p *Provider) Name() string { return "gemini" }
 // the account/model produced no image (e.g. the free tier without image
 // output access).
 func (p *Provider) GenerateImage(ctx context.Context, prompt string, _ provider.ImageGenOptions) ([]provider.Image, error) {
-	model := getenv("GEMINI_IMAGE_MODEL", "gemini-2.0-flash-preview-image-generation")
+	model := os.Getenv("GEMINI_IMAGE_MODEL")
+	if model == "" {
+		model = "gemini-2.0-flash-preview-image-generation"
+	}
 	blobs, err := p.client.GenerateImage(ctx, model, p.projectID, randomID(), prompt)
 	if err != nil {
 		return nil, err
@@ -79,13 +82,6 @@ func (p *Provider) GenerateImage(ctx context.Context, prompt string, _ provider.
 		images = append(images, provider.Image{MimeType: mime, Data: data})
 	}
 	return images, nil
-}
-
-func getenv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }
 
 func (p *Provider) Account(ctx context.Context) (*provider.AccountInfo, error) {

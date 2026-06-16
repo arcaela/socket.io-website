@@ -87,6 +87,25 @@ func (c ProviderCompactor) Compact(ctx context.Context, history []provider.Messa
 	return strings.TrimSpace(summary.String()), nil
 }
 
+// summarizeToSystem runs the compactor over msgs and wraps the result in a
+// single system message prefixed with header. It is the shared primitive behind
+// both compaction paths: the auto reset summarises the whole history, while the
+// manual /compact summarises only the prefix. Returns ok=false (without error)
+// when there is nothing to summarise or the summary came back empty.
+func summarizeToSystem(ctx context.Context, comp Compactor, msgs []provider.Message, header string) (provider.Message, bool, error) {
+	if comp == nil || len(msgs) == 0 {
+		return provider.Message{}, false, nil
+	}
+	summary, err := comp.Compact(ctx, msgs)
+	if err != nil {
+		return provider.Message{}, false, err
+	}
+	if strings.TrimSpace(summary) == "" {
+		return provider.Message{}, false, nil
+	}
+	return provider.Message{Role: provider.RoleSystem, Text: header + summary}, true, nil
+}
+
 // keepTailAfterSummary summarises the older part of `history` and keeps the
 // most recent `keep` messages verbatim, returning [summary, tail...]. The split
 // snaps to a clean boundary so a tool_result is never separated from the
@@ -97,15 +116,11 @@ func keepTailAfterSummary(ctx context.Context, comp Compactor, history []provide
 	if split < 1 {
 		return history, nil
 	}
-	summary, err := comp.Compact(ctx, history[:split])
-	if err != nil {
+	msg, ok, err := summarizeToSystem(ctx, comp, history[:split], compactedTailHeader)
+	if err != nil || !ok {
 		return history, err
 	}
-	if strings.TrimSpace(summary) == "" {
-		return history, nil
-	}
-	tail := append([]provider.Message{}, history[split:]...)
-	return append([]provider.Message{{Role: provider.RoleSystem, Text: compactedTailHeader + summary}}, tail...), nil
+	return append([]provider.Message{msg}, history[split:]...), nil
 }
 
 // safeCompactBoundary returns the index at which to split history into a

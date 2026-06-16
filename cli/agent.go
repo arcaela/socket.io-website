@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/arcaela/mini-cli/provider"
@@ -215,14 +214,15 @@ func (a *Agent) maybeCompact(ctx context.Context, history []provider.Message, la
 	if len(history) <= 1 {
 		return history
 	}
-	summary, err := a.Compactor.Compact(ctx, history)
-	if err != nil || strings.TrimSpace(summary) == "" {
-		if err != nil {
-			sink.OnError(fmt.Errorf("compaction failed (continuing with full history): %w", err))
-		}
+	msg, ok, err := summarizeToSystem(ctx, a.Compactor, history, compactedResetHeader)
+	if err != nil {
+		sink.OnError(fmt.Errorf("compaction failed (continuing with full history): %w", err))
 		return history
 	}
-	return []provider.Message{{Role: provider.RoleSystem, Text: compactedResetHeader + summary}}
+	if !ok {
+		return history
+	}
+	return []provider.Message{msg}
 }
 
 // executeToolsParallel runs tool calls concurrently with a bounded semaphore.
