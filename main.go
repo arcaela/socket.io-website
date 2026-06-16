@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -33,6 +34,15 @@ import (
 // defaultProviderName is what `mini` selects when MINI_PROVIDER is unset.
 // Today we only ship gemini; multi-provider users can override per-invocation.
 const defaultProviderName = "gemini"
+
+// Build metadata. Injected at build time via -ldflags "-X main.version=…"
+// (see the Makefile / release workflow). The defaults keep `go run` and
+// `go install` without ldflags working — they just report "dev".
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
 
 func main() {
 	os.Exit(mainImpl())
@@ -74,6 +84,8 @@ func mainImpl() int {
 		err = runTools(ctx, args[1:])
 	case "provider":
 		err = runProvider(ctx, args[1:])
+	case "version", "--version", "-v":
+		printVersion()
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -94,6 +106,7 @@ func printUsage() {
 Usage:
   mini                              start interactive chat
   mini chat ["prompt"]              one-shot if prompt given, else interactive
+  mini version                      print build version and exit
   mini whoami                       account info from the active provider
   mini tools                        list registered base + composite tools
   mini tools schema <name>          show JSON Schema for a tool
@@ -125,6 +138,15 @@ Env (neutral):
 
 Each provider may define its own env vars (e.g. GEMINI_RETRY_MAX,
 GEMINI_RETRY_MAX_WAIT). See the provider's package for details.`)
+}
+
+// printVersion reports the build metadata injected at link time plus the Go
+// toolchain and target. `mini version`, `--version` and `-v` all route here.
+func printVersion() {
+	fmt.Printf("mini %s\n", version)
+	fmt.Printf("  commit: %s\n", commit)
+	fmt.Printf("  built:  %s\n", date)
+	fmt.Printf("  go:     %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 
 // ---------------- provider subcommands ----------------
@@ -297,7 +319,7 @@ func runChat(ctx context.Context, args []string) error {
 		Model:        model,
 		MaxSteps:     maxSteps,
 		MaxParallel:  maxParallel,
-		SystemPrompt: defaultSystemPrompt(),
+		SystemPrompt: defaultSystemPrompt(reg),
 		// Compact when prompt > 8k tokens (≈ 30% of free-tier flash window).
 		// Override with MINI_COMPACT_THRESHOLD=0 to disable, or a different N.
 		Compactor:        cli.ProviderCompactor{Provider: prov, Model: model},
@@ -332,11 +354,13 @@ func runChat(ctx context.Context, args []string) error {
 // ---------------- system prompt ----------------
 
 // defaultSystemPrompt is sent on every model call. Override with
-// MINI_SYSTEM_PROMPT; memory is still appended in either case.
-func defaultSystemPrompt() string {
+// MINI_SYSTEM_PROMPT; memory is still appended in either case. The registry
+// is passed so the tool roster is rendered from the live set (built-ins plus
+// any MCP tools registered at startup).
+func defaultSystemPrompt(reg *funcs.Registry) string {
 	base := os.Getenv("MINI_SYSTEM_PROMPT")
 	if base == "" {
-		base = baseSystemPrompt()
+		base = baseSystemPrompt(reg)
 	}
 	if mem, err := funcs.LoadMemoryContent(); err == nil && mem != "" {
 		return base + "\n" + mem + "\n"
@@ -344,57 +368,42 @@ func defaultSystemPrompt() string {
 	return base
 }
 
-func baseSystemPrompt() string {
+func baseSystemPrompt(reg *funcs.Registry) string {
 	cwd, _ := os.Getwd()
-	return fmt.Sprintf(`You are mini, a focused coding agent that operates through these funcs.
+
+	// Render the tool list straight from the registry so this prompt can never
+	// drift from the tools actually available. Each tool's own Description is
+	// written for the model, so we reuse it verbatim.
+	var tools strings.Builder
+	for _, t := range reg.List() {
+		fmt.Fprintf(&tools, "- %-12s %s\n", t.Name(), t.Description())
+	}
+
+	return fmt.Sprintf(`You are mini, a focused coding agent that operates through these tools.
 
 TOOLS
 
-- bash      Execute a shell command. Foreground (default) blocks up to
-            timeout_seconds (default 120). Background=true returns
-            immediately with a log_file path; the process keeps running and
-            you can read its output later. Always include a one-line
-            "description" of what the command does.
-- write     Edit a file by replacing one EXACT block of text. Args:
-            path, old_block, new_block. The tool fails if old_block is
-            missing from the file or appears more than once — when that
-            happens, read the file first to get the real content. To
-            create a brand-new file, pass empty old_block.
-- read      Read line-numbered content from a file. Args: path, start, end,
-            max_lines, raw. Default output prefixes every line with its
-            1-indexed number ("    42→...") so write anchors line up.
-- glob      Find files or directories by pattern. Args: pattern, path,
-            type (f|d|a), max_results, include_hidden. Use "**" for
-            recursive matching.
-- task      Delegate a sub-task to a fresh sub-cli. Args: prompt,
-            background. Foreground blocks until the sub-agent finishes and
-            returns its full transcript. Background returns a log_file you
-            can poll later. Use this to fan out long investigations.
-- memory    Save persistent information for future sessions. Args: name,
-            content, mode (set|append). Stored under ~/.mini/memory/<name>.md
-            and auto-loaded into every future system prompt. Use for stable
-            facts about the user, project conventions, or anything you want
-            to remember across conversations.
-
+%s
 RULES
 
 - Be concise. Don't narrate what you're about to do — just call the tool.
-- Before editing, read the lines you'll touch so your old_block anchor is
-  byte-exact (whitespace matters).
+- Before editing with write, read the lines you'll touch so your old_block
+  anchor is byte-exact (whitespace matters). Pass dry_run=true to preview the
+  diff without writing.
 - Investigate in parallel: tool calls in a single turn run concurrently
   (default 4 at a time). Batch independent reads/globs.
 - Don't invent file paths. Use glob/read to discover them.
-- Use background only for genuinely long-running processes (servers,
+- Use background execution only for genuinely long-running processes (servers,
   watchers, big test suites). For short shell tasks, leave it false.
-- Use memory sparingly: only for facts that genuinely matter across
-  sessions, not running notes for the current task.
+- Use memory sparingly: only for facts that genuinely matter across sessions,
+  not running notes for the current task.
 
 ENVIRONMENT
 
 - Date: %s
 - Working directory: %s
 - OS: linux
-`, time.Now().Format("2006-01-02"), cwd)
+`, tools.String(), time.Now().Format("2006-01-02"), cwd)
 }
 
 // ---------------- helpers ----------------

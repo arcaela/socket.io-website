@@ -35,7 +35,8 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           out="mini-${GITHUB_REF_NAME}-${GOOS}-${GOARCH}"
-          go build -trimpath -ldflags="-s -w" -o "$out" .
+          ldflags="-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${GITHUB_SHA::7} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          go build -trimpath -ldflags="$ldflags" -o "$out" .
           shasum -a 256 "$out" > "$out.sha256"
           echo "ARTIFACT=$out" >> "$GITHUB_ENV"
 
