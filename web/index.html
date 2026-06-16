@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>mini — asistente de terminal</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #9da7b3;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: radial-gradient(1200px 600px at 50% -10%, #1b2430, var(--bg));
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 48px 20px 80px; }
+  header { text-align: center; margin-bottom: 48px; }
+  .logo {
+    display: inline-flex; align-items: center; gap: 12px;
+    font-family: var(--mono); font-size: 40px; font-weight: 700;
+  }
+  .logo .prompt { color: var(--accent2); }
+  .tag { color: var(--muted); font-size: 18px; margin-top: 8px; }
+  .pill {
+    display: inline-block; margin-top: 18px; padding: 6px 14px;
+    border: 1px solid var(--border); border-radius: 999px;
+    font-family: var(--mono); font-size: 13px; color: var(--muted);
+    background: var(--panel);
+  }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 680px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 14px; padding: 24px;
+  }
+  .card h2 { margin: 0 0 4px; font-size: 20px; }
+  .card .sub { color: var(--muted); font-size: 14px; margin-bottom: 16px; }
+  .card.interactive h2::before { content: "💬 "; }
+  .card.oneshot h2::before { content: "⚡ "; }
+  code, .term {
+    font-family: var(--mono); font-size: 13.5px;
+  }
+  .term {
+    background: #010409; border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px; margin: 14px 0 0;
+    white-space: pre-wrap; overflow-x: auto; color: #c9d1d9;
+  }
+  .term .c { color: var(--accent2); }   /* comando */
+  .term .p { color: var(--accent); }    /* prompt › */
+  .term .o { color: var(--muted); }     /* salida  */
+  ul.feat { list-style: none; padding: 0; margin: 40px 0 0; }
+  ul.feat li {
+    padding: 12px 16px; border: 1px solid var(--border);
+    border-radius: 10px; margin-bottom: 10px; background: var(--panel);
+  }
+  ul.feat li b { color: var(--accent); }
+  footer { text-align: center; color: var(--muted); margin-top: 48px; font-size: 13px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--accent2); margin-right:6px; vertical-align: middle; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo"><span class="prompt">›</span> mini</div>
+      <div class="tag">Un asistente que vive en tu terminal y trabaja por ti.</div>
+      <div class="pill"><span class="dot"></span>provider=gemini · model=gemini-2.5-flash · tools=11</div>
+    </header>
+
+    <div class="grid">
+      <div class="card interactive">
+        <h2>Modo interactivo</h2>
+        <div class="sub">Conversas con él; recuerda todo y te pide permiso.</div>
+        <div class="term"><span class="c">$ mini</span>
+<span class="o">mini-cli  provider=gemini  tools=11</span>
+<span class="p">›</span> ¿qué hace el archivo main.go?
+<span class="o">↳ lee el archivo y te lo explica…</span>
+<span class="p">›</span> /save mi-trabajo
+<span class="o">saved 12 message(s)</span></div>
+      </div>
+
+      <div class="card oneshot">
+        <h2>Modo no interactivo</h2>
+        <div class="sub">Una orden suelta, la ejecuta y te da el resultado.</div>
+        <div class="term"><span class="c">$ mini chat "resume este log \
+   y dime si hay errores"</span>
+<span class="o">[provider=gemini  tools=11]</span>
+<span class="o">↳ lo analiza y responde…</span>
+
+<span class="c">$ mini chat --yolo "ordena los imports"</span></div>
+      </div>
+    </div>
+
+    <ul class="feat">
+      <li><b>Te pide permiso</b> antes de borrar o sobrescribir algo (en interactivo).</li>
+      <li><b>Vista previa de cambios</b>: muestra el "antes y después" sin tocar el archivo.</li>
+      <li><b>Busca en internet</b>, ejecuta comandos y deja procesos en segundo plano.</li>
+      <li><b>Recuerda cosas</b> entre sesiones y puede guardar/retomar conversaciones.</li>
+      <li><b>Elige el cerebro</b>: Gemini (gratis), OpenAI o Anthropic.</li>
+    </ul>
+
+    <footer>
+      Generado por mini · servido desde un entorno aislado · <span id="ts"></span>
+    </footer>
+  </div>
+  <script>
+    document.getElementById('ts').textContent = new Date().toLocaleString('es');
+  </script>
+</body>
+</html>
