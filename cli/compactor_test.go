@@ -24,89 +24,84 @@ func (s *stubCompactor) Compact(_ context.Context, history []provider.Message) (
 	return s.summary, s.err
 }
 
-func TestMaybeCompact_BelowThresholdIsNoOp(t *testing.T) {
+// Auto-compaction (maybeCompact) resets the whole conversation to a single
+// summary, and ONLY in interactive mode.
+
+func TestMaybeCompact_NoOpWhenNotInteractive(t *testing.T) {
 	sc := &stubCompactor{summary: "should not be called"}
-	a := &Agent{Compactor: sc, CompactThreshold: 1000}
+	a := &Agent{Compactor: sc, ContextWindow: 1000, Interactive: false}
+	history := []provider.Message{
+		{Role: provider.RoleUser, Text: "a"},
+		{Role: provider.RoleAssistant, Text: "b"},
+	}
+	out := a.maybeCompact(context.Background(), history, &provider.Usage{PromptTokens: 999}, &recordingSink2{})
+	if sc.calls != 0 || len(out) != 2 {
+		t.Fatal("one-shot (non-interactive) runs must never auto-compact")
+	}
+}
+
+func TestMaybeCompact_BelowTriggerIsNoOp(t *testing.T) {
+	sc := &stubCompactor{summary: "should not be called"}
+	a := &Agent{Compactor: sc, CompactThreshold: 1000, Interactive: true}
 	history := []provider.Message{
 		{Role: provider.RoleUser, Text: "a"},
 		{Role: provider.RoleAssistant, Text: "b"},
 	}
 	out := a.maybeCompact(context.Background(), history, &provider.Usage{PromptTokens: 500}, &recordingSink2{})
-	if sc.calls != 0 {
-		t.Fatalf("expected Compactor not called, got %d calls", sc.calls)
-	}
-	if len(out) != 2 {
-		t.Fatalf("history should be unchanged, got len %d", len(out))
+	if sc.calls != 0 || len(out) != 2 {
+		t.Fatalf("below trigger should be a no-op, got %d calls / len %d", sc.calls, len(out))
 	}
 }
 
-func TestMaybeCompact_DisabledWhenThresholdZero(t *testing.T) {
+func TestMaybeCompact_DisabledWhenNoTrigger(t *testing.T) {
 	sc := &stubCompactor{summary: "x"}
-	a := &Agent{Compactor: sc, CompactThreshold: 0}
-	history := []provider.Message{
-		{Role: provider.RoleUser, Text: "a"},
-	}
+	a := &Agent{Compactor: sc, Interactive: true} // window=0 and threshold=0 → never triggers
+	history := []provider.Message{{Role: provider.RoleUser, Text: "a"}, {Role: provider.RoleAssistant, Text: "b"}}
 	out := a.maybeCompact(context.Background(), history, &provider.Usage{PromptTokens: 99999}, &recordingSink2{})
-	if sc.calls != 0 || len(out) != 1 {
-		t.Fatal("threshold=0 should disable compaction entirely")
+	if sc.calls != 0 || len(out) != 2 {
+		t.Fatal("no context window and no threshold should disable compaction")
 	}
 }
 
-func TestMaybeCompact_HappyPath(t *testing.T) {
+func TestMaybeCompact_ResetsToSummary(t *testing.T) {
 	sc := &stubCompactor{summary: "User likes Go and tea."}
-	a := &Agent{Compactor: sc, CompactThreshold: 100, CompactKeepRecent: 2}
-
-	// 8 messages of history, with 6 old and 2 to keep verbatim.
+	// 90% of window=1000 is 900; prompt 950 → triggers.
+	a := &Agent{Compactor: sc, ContextWindow: 1000, Interactive: true}
 	history := []provider.Message{
 		{Role: provider.RoleUser, Text: "msg1"},
 		{Role: provider.RoleAssistant, Text: "ans1"},
 		{Role: provider.RoleUser, Text: "msg2"},
 		{Role: provider.RoleAssistant, Text: "ans2"},
-		{Role: provider.RoleUser, Text: "msg3"},
-		{Role: provider.RoleAssistant, Text: "ans3"},
-		{Role: provider.RoleUser, Text: "msg4 (keep)"},
-		{Role: provider.RoleAssistant, Text: "ans4 (keep)"},
 	}
-	out := a.maybeCompact(context.Background(), history, &provider.Usage{PromptTokens: 500}, &recordingSink2{})
+	out := a.maybeCompact(context.Background(), history, &provider.Usage{PromptTokens: 950}, &recordingSink2{})
 
-	if sc.calls != 1 {
-		t.Fatalf("expected 1 Compact call, got %d", sc.calls)
+	if sc.calls != 1 || len(sc.seen) != 4 {
+		t.Fatalf("expected the whole history summarised once, got %d calls / %d seen", sc.calls, len(sc.seen))
 	}
-	if len(sc.seen) != 6 {
-		t.Errorf("expected 6 messages forwarded to compactor, got %d", len(sc.seen))
+	if len(out) != 1 || out[0].Role != provider.RoleSystem {
+		t.Fatalf("expected a single system summary, got %+v", out)
 	}
-	if len(out) != 3 {
-		t.Fatalf("expected 1 system summary + 2 verbatim = 3 messages, got %d", len(out))
-	}
-	if out[0].Role != provider.RoleSystem || !strings.Contains(out[0].Text, "User likes Go and tea") {
-		t.Errorf("first message should be the summary, got %+v", out[0])
-	}
-	if out[1].Text != "msg4 (keep)" || out[2].Text != "ans4 (keep)" {
-		t.Errorf("verbatim tail not preserved: %+v %+v", out[1], out[2])
+	if !strings.Contains(out[0].Text, "User likes Go and tea") {
+		t.Errorf("summary text missing: %+v", out[0])
 	}
 }
 
 func TestMaybeCompact_CompactorErrorReturnsOriginal(t *testing.T) {
 	sc := &stubCompactor{err: errors.New("boom")}
-	a := &Agent{Compactor: sc, CompactThreshold: 100, CompactKeepRecent: 2}
+	a := &Agent{Compactor: sc, ContextWindow: 1000, Interactive: true}
 	history := []provider.Message{
 		{Role: provider.RoleUser, Text: "a"},
 		{Role: provider.RoleAssistant, Text: "b"},
-		{Role: provider.RoleUser, Text: "c"},
-		{Role: provider.RoleAssistant, Text: "d"},
 	}
-	sink := &recordingSink2{}
-	out := a.maybeCompact(context.Background(), history, &provider.Usage{PromptTokens: 999}, sink)
+	out := a.maybeCompact(context.Background(), history, &provider.Usage{PromptTokens: 999}, &recordingSink2{})
 	if len(out) != len(history) {
 		t.Fatalf("on error, full history must be preserved")
 	}
 }
 
 func TestMaybeCompact_EmptySummaryReturnsOriginal(t *testing.T) {
-	// If the model returns "" we shouldn't replace anything with a meaningless
-	// memo. Bail and let the user /clear or /compact manually.
 	sc := &stubCompactor{summary: ""}
-	a := &Agent{Compactor: sc, CompactThreshold: 100, CompactKeepRecent: 1}
+	a := &Agent{Compactor: sc, ContextWindow: 1000, Interactive: true}
 	history := []provider.Message{
 		{Role: provider.RoleUser, Text: "x"},
 		{Role: provider.RoleAssistant, Text: "y"},
@@ -117,25 +112,11 @@ func TestMaybeCompact_EmptySummaryReturnsOriginal(t *testing.T) {
 	}
 }
 
-func TestMaybeCompact_TooShortForKeep(t *testing.T) {
-	sc := &stubCompactor{summary: "ignored"}
-	a := &Agent{Compactor: sc, CompactThreshold: 100, CompactKeepRecent: 10}
-	history := []provider.Message{
-		{Role: provider.RoleUser, Text: "x"},
-	}
-	out := a.maybeCompact(context.Background(), history, &provider.Usage{PromptTokens: 9999}, &recordingSink2{})
-	if sc.calls != 0 || len(out) != 1 {
-		t.Fatal("short history must not invoke compactor")
-	}
-}
-
-// TestMaybeCompact_SnapsBoundaryToAvoidOrphanedToolResult checks that when the
-// keep-window would start the verbatim tail on a tool_result, the split snaps
-// back to a clean turn boundary so the tool_call and its result stay together
-// (an orphaned tool_result would be rejected by OpenAI/Anthropic).
-func TestMaybeCompact_SnapsBoundaryToAvoidOrphanedToolResult(t *testing.T) {
+// keepTailAfterSummary (the manual /compact path) summarises the old prefix and
+// keeps a verbatim tail, snapping the split to a clean boundary so a
+// tool_result is never orphaned from its tool_call.
+func TestKeepTailAfterSummary_SnapsBoundaryToAvoidOrphan(t *testing.T) {
 	sc := &stubCompactor{summary: "summary"}
-	a := &Agent{Compactor: sc, CompactThreshold: 100, CompactKeepRecent: 2}
 	history := []provider.Message{
 		{Role: provider.RoleUser, Text: "first"},
 		{Role: provider.RoleAssistant, Text: "answer one"},
@@ -144,23 +125,32 @@ func TestMaybeCompact_SnapsBoundaryToAvoidOrphanedToolResult(t *testing.T) {
 		{Role: provider.RoleTool, ToolResult: &provider.ToolResult{CallID: "1", Name: "bash", Result: "ok"}},
 		{Role: provider.RoleAssistant, Text: "done"},
 	}
-	out := a.maybeCompact(context.Background(), history, &provider.Usage{PromptTokens: 500}, &recordingSink2{})
-
-	// keep=2 would split at index 4 (the tool_result); the boundary must snap
-	// back to "second" (index 2), so 2 messages are summarised and 4 kept.
-	if len(sc.seen) != 2 {
-		t.Fatalf("expected 2 messages summarised, got %d", len(sc.seen))
+	out, err := keepTailAfterSummary(context.Background(), sc, history, 2)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(out) != 5 {
-		t.Fatalf("expected 1 summary + 4 verbatim = 5, got %d", len(out))
+	// keep=2 would split at index 4 (the tool_result); snap back to "second"
+	// (index 2): 2 summarised, 4 kept.
+	if len(sc.seen) != 2 || len(out) != 5 || out[0].Role != provider.RoleSystem {
+		t.Fatalf("unexpected split: %d seen, out len %d", len(sc.seen), len(out))
 	}
-	if out[0].Role != provider.RoleSystem {
-		t.Fatalf("first message should be the summary, got %+v", out[0])
-	}
-	// No tool_result may appear without its tool_call immediately before it.
 	for i, m := range out {
 		if m.ToolResult != nil && (i == 0 || out[i-1].ToolCall == nil) {
 			t.Fatalf("orphaned tool_result at index %d", i)
+		}
+	}
+}
+
+func TestContextWindowFor(t *testing.T) {
+	cases := map[string]int{
+		"gemini-2.5-flash":  1_000_000,
+		"claude-sonnet-4-5": 200_000,
+		"gpt-5":             400_000,
+		"something-unknown": 128_000,
+	}
+	for model, want := range cases {
+		if got := ContextWindowFor(model); got != want {
+			t.Errorf("ContextWindowFor(%q) = %d, want %d", model, got, want)
 		}
 	}
 }

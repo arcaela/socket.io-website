@@ -44,14 +44,16 @@ type Agent struct {
 	// an error ToolResult fed back to the model (so it can react / retry).
 	Approver Approver
 
-	// Compaction: when the most recent turn's PromptTokens exceeds
-	// CompactThreshold (> 0), Run calls Compactor to summarise the older
-	// messages into a single system message, keeping CompactKeepRecent
-	// entries verbatim. Cheap insurance against context-window overflow on
-	// long REPL sessions.
+	// Compaction. When a turn's PromptTokens crosses the trigger (90% of
+	// ContextWindow, or CompactThreshold when set as an explicit override),
+	// Run summarises the whole conversation into a single system message and
+	// starts fresh from it — but ONLY in interactive mode. A one-shot run that
+	// overflows is meant to fail loudly rather than silently rewrite history.
 	Compactor         Compactor
-	CompactThreshold  int // 0 disables
-	CompactKeepRecent int // 0 → defaultCompactKeep
+	ContextWindow     int  // model context size in tokens; 0 = unknown (no auto-compaction)
+	CompactThreshold  int  // explicit token trigger override; 0 = use 90% of ContextWindow
+	CompactKeepRecent int  // verbatim tail kept by the manual /compact path; 0 → defaultCompactKeep
+	Interactive       bool // auto-compaction only runs in interactive sessions
 }
 
 const (
@@ -177,13 +179,6 @@ func (a *Agent) Run(
 				ToolResult: &r,
 			})
 		}
-
-		// Mid-turn compaction: a turn with many tool-calling steps can grow
-		// the prompt past the context window before the turn ever ends. If the
-		// last request already exceeded the threshold and the model wants to
-		// keep going, summarise now so the NEXT request in this same turn fits.
-		// maybeCompact is a no-op below threshold or without a compactor.
-		history = a.maybeCompact(ctx, history, lastUsage, sink)
 	}
 
 	err := fmt.Errorf("%w (limit %d)", SentinelMaxSteps, maxSteps)
@@ -191,85 +186,43 @@ func (a *Agent) Run(
 	return history, err
 }
 
-// maybeCompact summarises the older portion of `history` into a single
-// system message when the last turn's prompt exceeded CompactThreshold.
-// Keeps CompactKeepRecent (or 6 by default) most recent messages verbatim
-// so the model still has fresh context.
-//
-// Failures are non-fatal: we log to the sink via OnError-equivalent path
-// only if explicitly wired; otherwise the original history is returned and
-// the next turn proceeds normally.
+// compactTriggerTokens is the prompt-token count at which auto-compaction
+// fires: an explicit CompactThreshold override if set, otherwise 90% of the
+// model's context window. Returns 0 (never trigger) when neither is known.
+func (a *Agent) compactTriggerTokens() int {
+	if a.CompactThreshold > 0 {
+		return a.CompactThreshold
+	}
+	if a.ContextWindow > 0 {
+		return a.ContextWindow * 9 / 10
+	}
+	return 0
+}
+
+// maybeCompact starts a fresh conversation from a summary when the prompt has
+// grown past the trigger (≈90% of the context window). This runs ONLY in
+// interactive mode: a one-shot run that overflows should fail loudly rather
+// than silently rewrite its own history. Failures are non-fatal — the original
+// history is returned and the next turn proceeds as before.
 func (a *Agent) maybeCompact(ctx context.Context, history []provider.Message, lastUsage *provider.Usage, sink Sink) []provider.Message {
-	if a.Compactor == nil || a.CompactThreshold <= 0 {
+	if a.Compactor == nil || !a.Interactive {
 		return history
 	}
-	if lastUsage == nil || lastUsage.PromptTokens < a.CompactThreshold {
+	trigger := a.compactTriggerTokens()
+	if trigger <= 0 || lastUsage == nil || lastUsage.PromptTokens < trigger {
 		return history
 	}
-	keep := a.CompactKeepRecent
-	if keep <= 0 {
-		keep = defaultCompactKeep
-	}
-	if len(history) <= keep {
+	if len(history) <= 1 {
 		return history
 	}
-
-	// Snap the split point to a clean boundary so we never summarise away a
-	// tool_call while keeping its tool_result verbatim (an orphan pair that
-	// OpenAI and Anthropic reject). If no clean boundary exists — e.g. one
-	// huge in-flight tool block — skip this round and try again next step.
-	split := safeCompactBoundary(history, keep)
-	if split < 1 {
-		return history
-	}
-	toCompact := history[:split]
-	tail := append([]provider.Message{}, history[split:]...)
-
-	summary, err := a.Compactor.Compact(ctx, toCompact)
+	summary, err := a.Compactor.Compact(ctx, history)
 	if err != nil || strings.TrimSpace(summary) == "" {
-		// Silent fallback: prompt-window pressure isn't worth crashing the
-		// turn over. Next turn just keeps the full history; user notices via
-		// rate-limit pressure and can /clear manually.
 		if err != nil {
 			sink.OnError(fmt.Errorf("compaction failed (continuing with full history): %w", err))
 		}
 		return history
 	}
-	return append([]provider.Message{
-		{
-			Role: provider.RoleSystem,
-			Text: "[compacted earlier history; verbatim turns continue below]\n" + summary,
-		},
-	}, tail...)
-}
-
-// safeCompactBoundary returns the index at which to split history into a
-// summarised prefix (history[:idx]) and a verbatim tail (history[idx:]).
-// It starts from len-keep and snaps BACKWARD until the tail begins on a clean
-// boundary, so compaction never separates a tool_result from the tool_call it
-// answers. Returns 0 (or less) when no clean boundary exists below len-keep,
-// signalling the caller to skip compaction this round.
-func safeCompactBoundary(history []provider.Message, keep int) int {
-	idx := len(history) - keep
-	for idx > 0 && !isCleanBoundary(history[idx]) {
-		idx--
-	}
-	return idx
-}
-
-// isCleanBoundary reports whether a message can safely START a verbatim tail —
-// i.e. it does not depend on an earlier message to be valid. A tool_result
-// depends on its tool_call; an assistant tool_call may be the middle of a
-// multi-call block whose siblings would be summarised away. Plain user,
-// assistant-text and system messages are always safe.
-func isCleanBoundary(m provider.Message) bool {
-	if m.ToolResult != nil {
-		return false
-	}
-	if m.Role == provider.RoleAssistant && m.ToolCall != nil {
-		return false
-	}
-	return true
+	return []provider.Message{{Role: provider.RoleSystem, Text: compactedResetHeader + summary}}
 }
 
 // executeToolsParallel runs tool calls concurrently with a bounded semaphore.

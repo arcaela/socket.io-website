@@ -228,23 +228,19 @@ func (c *Chat) handleSlash(ctx context.Context, line string) (done bool, err err
 		before := len(c.History)
 		keep := c.Agent.CompactKeepRecent
 		if keep <= 0 {
-			keep = 6
+			keep = defaultCompactKeep
 		}
-		if before <= keep {
-			fmt.Fprintln(c.out, "history too short to compact")
-			return false, nil
-		}
-		toCompact := c.History[:before-keep]
-		tail := append([]provider.Message{}, c.History[before-keep:]...)
 		fmt.Fprint(c.out, "summarising… ")
-		summary, err := c.Agent.Compactor.Compact(ctx, toCompact)
+		newHist, err := keepTailAfterSummary(ctx, c.Agent.Compactor, c.History, keep)
 		if err != nil {
 			fmt.Fprintln(c.out, "failed:", err)
 			return false, nil
 		}
-		c.History = append([]provider.Message{
-			{Role: provider.RoleSystem, Text: "[compacted earlier history; verbatim turns continue below]\n" + summary},
-		}, tail...)
+		if len(newHist) == before {
+			fmt.Fprintln(c.out, "history too short to compact")
+			return false, nil
+		}
+		c.History = newHist
 		fmt.Fprintf(c.out, "done. history: %d → %d messages\n", before, len(c.History))
 		return false, nil
 	case "/save":
@@ -294,17 +290,17 @@ func (c *Chat) handleSlash(ctx context.Context, line string) (done bool, err err
 			last.PromptTokens, last.OutputTokens, last.ThoughtTokens, last.TotalTokens)
 		fmt.Fprintf(c.out, "session:    prompt=%d  out=%d  thoughts=%d  total=%d\n",
 			t.PromptTokens, t.OutputTokens, t.ThoughtTokens, t.TotalTokens)
-		if c.Agent.CompactThreshold > 0 {
-			delta := c.Agent.CompactThreshold - last.PromptTokens
+		if trigger := c.Agent.compactTriggerTokens(); trigger > 0 {
+			delta := trigger - last.PromptTokens
 			switch {
 			case last.PromptTokens == 0:
-				fmt.Fprintf(c.out, "compaction: triggers at prompt=%d tokens\n", c.Agent.CompactThreshold)
+				fmt.Fprintf(c.out, "compaction: triggers at prompt=%d tokens\n", trigger)
 			case delta <= 0:
 				fmt.Fprintf(c.out, "compaction: ARMED — next turn will summarise (threshold %d, last prompt %d)\n",
-					c.Agent.CompactThreshold, last.PromptTokens)
+					trigger, last.PromptTokens)
 			default:
 				fmt.Fprintf(c.out, "compaction: %d tokens of headroom (threshold %d)\n",
-					delta, c.Agent.CompactThreshold)
+					delta, trigger)
 			}
 		}
 		return false, nil

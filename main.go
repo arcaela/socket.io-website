@@ -320,10 +320,12 @@ func runChat(ctx context.Context, args []string) error {
 		MaxSteps:     maxSteps,
 		MaxParallel:  maxParallel,
 		SystemPrompt: defaultSystemPrompt(reg),
-		// Compact when prompt > 8k tokens (≈ 30% of free-tier flash window).
-		// Override with MINI_COMPACT_THRESHOLD=0 to disable, or a different N.
+		// Auto-compaction (interactive only) fires at 90% of the model's
+		// context window. Set MINI_COMPACT_THRESHOLD to override with an
+		// explicit token trigger, or MINI_CONTEXT_WINDOW to change the window.
 		Compactor:        cli.ProviderCompactor{Provider: prov, Model: model},
-		CompactThreshold: envInt("MINI_COMPACT_THRESHOLD", 8000),
+		ContextWindow:    cli.ContextWindowFor(model),
+		CompactThreshold: envInt("MINI_COMPACT_THRESHOLD", 0),
 	}
 
 	yolo := flags.Yolo || os.Getenv("MINI_YOLO") == "1"
@@ -339,6 +341,10 @@ func runChat(ctx context.Context, args []string) error {
 		_, err := a.Run(ctx, nil, prompt, &cliSink{})
 		return err
 	}
+
+	// REPL only: auto-compaction (summarise & restart) is safe here because a
+	// human is present; one-shot runs leave Interactive=false and fail loudly.
+	a.Interactive = true
 
 	isTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 	// REPL: prompt the user before risky tools, unless --yolo / MINI_YOLO.

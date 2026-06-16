@@ -3,9 +3,18 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/arcaela/mini-cli/provider"
+)
+
+// Headers prepended to a summary so the model knows it is reading a condensed
+// memo rather than verbatim turns.
+const (
+	compactedResetHeader = "[previous conversation summarized to fit the context window]\n"
+	compactedTailHeader  = "[compacted earlier history; verbatim turns continue below]\n"
 )
 
 // =============================================================================
@@ -76,6 +85,74 @@ func (c ProviderCompactor) Compact(ctx context.Context, history []provider.Messa
 		}
 	}
 	return strings.TrimSpace(summary.String()), nil
+}
+
+// keepTailAfterSummary summarises the older part of `history` and keeps the
+// most recent `keep` messages verbatim, returning [summary, tail...]. The split
+// snaps to a clean boundary so a tool_result is never separated from the
+// tool_call it answers (which OpenAI/Anthropic reject). Used by manual /compact.
+// Returns the history unchanged when it is too short or the summary is empty.
+func keepTailAfterSummary(ctx context.Context, comp Compactor, history []provider.Message, keep int) ([]provider.Message, error) {
+	split := safeCompactBoundary(history, keep)
+	if split < 1 {
+		return history, nil
+	}
+	summary, err := comp.Compact(ctx, history[:split])
+	if err != nil {
+		return history, err
+	}
+	if strings.TrimSpace(summary) == "" {
+		return history, nil
+	}
+	tail := append([]provider.Message{}, history[split:]...)
+	return append([]provider.Message{{Role: provider.RoleSystem, Text: compactedTailHeader + summary}}, tail...), nil
+}
+
+// safeCompactBoundary returns the index at which to split history into a
+// summarised prefix (history[:idx]) and a verbatim tail (history[idx:]). It
+// starts from len-keep and snaps BACKWARD until the tail begins on a clean
+// boundary, so compaction never separates a tool_result from its tool_call.
+// Returns 0 (or less) when no clean boundary exists below len-keep.
+func safeCompactBoundary(history []provider.Message, keep int) int {
+	idx := len(history) - keep
+	for idx > 0 && !isCleanBoundary(history[idx]) {
+		idx--
+	}
+	return idx
+}
+
+// isCleanBoundary reports whether a message can safely START a verbatim tail —
+// i.e. it does not depend on an earlier message to be valid. A tool_result
+// depends on its tool_call; an assistant tool_call may be mid multi-call block.
+func isCleanBoundary(m provider.Message) bool {
+	if m.ToolResult != nil {
+		return false
+	}
+	if m.Role == provider.RoleAssistant && m.ToolCall != nil {
+		return false
+	}
+	return true
+}
+
+// ContextWindowFor returns a model's context window in tokens. Override with
+// MINI_CONTEXT_WINDOW; otherwise matched by known model-name prefixes, with a
+// conservative default for anything unrecognised.
+func ContextWindowFor(model string) int {
+	if v := os.Getenv("MINI_CONTEXT_WINDOW"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	switch m := strings.ToLower(model); {
+	case strings.HasPrefix(m, "gemini"):
+		return 1_000_000
+	case strings.HasPrefix(m, "claude"):
+		return 200_000
+	case strings.HasPrefix(m, "gpt-5"):
+		return 400_000
+	default:
+		return 128_000
+	}
 }
 
 // renderTranscript flattens the provider message slice into a single string
