@@ -327,6 +327,46 @@ func TestWrite_DeletesBlockWhenNewIsEmpty(t *testing.T) {
 	}
 }
 
+func TestWrite_DryRunPreviewDoesNotModify(t *testing.T) {
+	r := BuiltIn()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "code.go")
+	original := "package main\n\nfunc Hello() string {\n    return \"old\"\n}\n"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := r.Call(context.Background(), "write", map[string]any{
+		"path":      path,
+		"old_block": "    return \"old\"",
+		"new_block": "    return \"new\"",
+		"dry_run":   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(WriteResult)
+	if !res.DryRun {
+		t.Fatal("expected DryRun=true")
+	}
+	if !strings.Contains(res.Diff, `-    return "old"`) || !strings.Contains(res.Diff, `+    return "new"`) {
+		t.Fatalf("diff missing expected lines:\n%s", res.Diff)
+	}
+	got, _ := os.ReadFile(path)
+	if string(got) != original {
+		t.Fatalf("dry_run must not modify the file, got: %q", string(got))
+	}
+}
+
+func TestWrite_DryRunIsLowRisk(t *testing.T) {
+	tool, _ := BuiltIn().Get("write")
+	if got := AssessRisk(tool, map[string]any{"dry_run": true}); got != RiskLow {
+		t.Fatalf("dry_run write should be RiskLow, got %v", got)
+	}
+	if got := AssessRisk(tool, map[string]any{}); got != RiskHigh {
+		t.Fatalf("real write should be RiskHigh, got %v", got)
+	}
+}
+
 // ---------- ReadTool (composite) ----------
 
 func TestRead_FullFileWithLineNumbers(t *testing.T) {
