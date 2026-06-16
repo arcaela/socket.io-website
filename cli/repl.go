@@ -103,7 +103,7 @@ func (c *Chat) Run(ctx context.Context) error {
 
 		// Live sink writes events directly to c.out AND threads usage
 		// back into the Chat so /tokens has the full picture.
-		sink := &terminalSink{out: c.out, tty: c.tty, onUsage: c.recordUsage}
+		sink := NewStreamSink(c.out, c.tty, c.tty, true, c.recordUsage)
 		newHistory, err := c.Agent.Run(ctx, c.History, line, sink)
 		if err != nil && !isCancelled(err) {
 			fmt.Fprintln(c.out, "✗", err)
@@ -323,7 +323,9 @@ func (c *Chat) handleSlash(ctx context.Context, line string) (done bool, err err
 
 type terminalSink struct {
 	out         io.Writer
-	tty         bool
+	tty         bool // REPL-only niceties (e.g. the step-count line)
+	showTokens  bool // print the per-turn [tokens: …] line
+	emitErrors  bool // print the ✗ error line (off in one-shot; main prints it)
 	mu          sync.Mutex
 	thoughtOpen bool
 
@@ -331,6 +333,14 @@ type terminalSink struct {
 	// provider. Set by the Chat that owns this sink so /tokens can show
 	// session-wide totals.
 	onUsage func(provider.Usage)
+}
+
+// NewStreamSink renders agent events to out. It is the single sink used by both
+// the REPL and one-shot mode. tty toggles REPL-only niceties, showTokens prints
+// per-turn usage, and emitErrors prints the ✗ line (one-shot leaves it off and
+// lets main print the returned error once).
+func NewStreamSink(out io.Writer, tty, showTokens, emitErrors bool, onUsage func(provider.Usage)) Sink {
+	return &terminalSink{out: out, tty: tty, showTokens: showTokens, emitErrors: emitErrors, onUsage: onUsage}
 }
 
 func (s *terminalSink) OnUserMessage(_ string) {}
@@ -390,7 +400,7 @@ func (s *terminalSink) OnUsage(u provider.Usage) {
 	if s.onUsage != nil {
 		s.onUsage(u)
 	}
-	if !s.tty {
+	if !s.showTokens {
 		return
 	}
 	s.mu.Lock()
@@ -408,6 +418,9 @@ func (s *terminalSink) OnTurnComplete(steps int) {
 }
 
 func (s *terminalSink) OnError(err error) {
+	if !s.emitErrors {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fmt.Fprintf(s.out, "\n✗ %v\n", err)

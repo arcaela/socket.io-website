@@ -90,7 +90,7 @@ func (a *TerminalApprover) Approve(_ context.Context, call provider.ToolCall, ri
 	}
 
 	args, _ := json.Marshal(call.Args)
-	fmt.Fprintf(a.Out, "\n⚠  [%s risk] %s %s\n", risk, call.Name, truncateForPrompt(string(args), 200))
+	fmt.Fprintf(a.Out, "\n⚠  [%s risk] %s %s\n", risk, call.Name, truncate(string(args), 200))
 	fmt.Fprintf(a.Out, "   approve? [y]es / [n]o / [a]lways / [N]ever (default no): ")
 
 	scanner := bufio.NewScanner(a.In)
@@ -137,12 +137,4 @@ func PolicyApproverForOneShot() Approver {
 		return YoloApprover{}
 	}
 	return StrictApprover{}
-}
-
-func truncateForPrompt(s string, n int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }

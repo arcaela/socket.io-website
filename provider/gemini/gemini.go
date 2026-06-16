@@ -212,7 +212,7 @@ func messagesToContents(msgs []provider.Message) ([]Content, *Content, error) {
 			for _, img := range m.ToolResult.Images {
 				parts = append(parts, Part{InlineData: &InlineData{
 					MimeType: img.MimeType,
-					Data:     base64.StdEncoding.EncodeToString(img.Data),
+					Data:     img.Base64(),
 				}})
 			}
 			c.Parts = parts

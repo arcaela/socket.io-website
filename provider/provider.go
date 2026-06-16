@@ -6,7 +6,10 @@
 // each provider's package before reaching the agent.
 package provider
 
-import "context"
+import (
+	"context"
+	"encoding/base64"
+)
 
 type Role string
 
@@ -51,6 +54,12 @@ type Image struct {
 	MimeType string
 	Data     []byte
 }
+
+// Base64 returns the image data as a standard base64 string.
+func (im Image) Base64() string { return base64.StdEncoding.EncodeToString(im.Data) }
+
+// DataURL returns the image as an RFC 2397 data: URL (used by OpenAI image_url).
+func (im Image) DataURL() string { return "data:" + im.MimeType + ";base64," + im.Base64() }
 
 // ToolDecl is what we pass to the provider so the model can call tools.
 type ToolDecl struct {

@@ -179,12 +179,12 @@ func summarizeToolResult(r *provider.ToolResult) string {
 		return ""
 	}
 	if r.Error != "" {
-		return "error: " + truncateForPrompt(r.Error, 200)
+		return "error: " + truncate(r.Error, 200)
 	}
 	switch v := r.Result.(type) {
 	case string:
-		return truncateForPrompt(v, 200)
+		return truncate(v, 200)
 	default:
-		return truncateForPrompt(fmt.Sprintf("%v", v), 200)
+		return truncate(fmt.Sprintf("%v", v), 200)
 	}
 }

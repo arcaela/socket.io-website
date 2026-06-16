@@ -397,7 +397,7 @@ func imagePartsToChat(images []provider.Image) []map[string]any {
 	for _, img := range images {
 		parts = append(parts, map[string]any{
 			"type":      "image_url",
-			"image_url": map[string]any{"url": "data:" + img.MimeType + ";base64," + base64.StdEncoding.EncodeToString(img.Data)},
+			"image_url": map[string]any{"url": img.DataURL()},
 		})
 	}
 	return parts

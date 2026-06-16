@@ -16,7 +16,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -337,7 +336,7 @@ func messagesToAnthropic(msgs []provider.Message) (string, []apiMessage) {
 						"source": map[string]any{
 							"type":       "base64",
 							"media_type": img.MimeType,
-							"data":       base64.StdEncoding.EncodeToString(img.Data),
+							"data":       img.Base64(),
 						},
 					})
 				}

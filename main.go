@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -344,7 +343,9 @@ func runChat(ctx context.Context, args []string) error {
 			a.Approver = cli.StrictApprover{}
 		}
 		fmt.Printf("[provider=%s  model=%s  tools=%d]\n", prov.Name(), model, len(reg.List()))
-		_, err := a.Run(ctx, nil, prompt, &cliSink{})
+		// One-shot uses the same renderer as the REPL: no TTY niceties, print
+		// tokens, and let this function print the returned error (emitErrors=false).
+		_, err := a.Run(ctx, nil, prompt, cli.NewStreamSink(os.Stdout, false, true, false, nil))
 		return err
 	}
 
@@ -531,71 +532,3 @@ func envInt(key string, def int) int {
 	}
 	return n
 }
-
-// cliSink renders agent events for one-shot mode. Tool execution may run
-// concurrently, so writes are guarded by a mutex.
-type cliSink struct {
-	mu          sync.Mutex
-	thoughtOpen bool
-}
-
-func (*cliSink) OnUserMessage(_ string) {}
-
-func (s *cliSink) OnAssistantThoughtDelta(t string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.thoughtOpen {
-		fmt.Print("┊ thinking… ")
-		s.thoughtOpen = true
-	}
-	fmt.Print(strings.ReplaceAll(t, "\n", " "))
-}
-
-func (s *cliSink) OnAssistantTextDelta(t string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.thoughtOpen {
-		fmt.Println()
-		s.thoughtOpen = false
-	}
-	fmt.Print(t)
-}
-
-func (s *cliSink) OnAssistantTextFinal(_ string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	fmt.Println()
-}
-
-func (s *cliSink) OnToolCall(c provider.ToolCall) {
-	args, _ := json.Marshal(c.Args)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	fmt.Printf("↳ tool %s %s\n", c.Name, string(args))
-}
-
-func (s *cliSink) OnToolResult(r provider.ToolResult) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if r.Error != "" {
-		fmt.Printf("↲ %s error: %s\n", r.Name, r.Error)
-		return
-	}
-	body, _ := json.Marshal(r.Result)
-	const max = 600
-	if len(body) > max {
-		fmt.Printf("↲ %s result (truncated %d→%d): %s…\n", r.Name, len(body), max, string(body[:max]))
-	} else {
-		fmt.Printf("↲ %s result: %s\n", r.Name, string(body))
-	}
-}
-
-func (s *cliSink) OnUsage(u provider.Usage) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	fmt.Printf("[tokens: prompt=%d out=%d thoughts=%d total=%d]\n",
-		u.PromptTokens, u.OutputTokens, u.ThoughtTokens, u.TotalTokens)
-}
-
-func (*cliSink) OnTurnComplete(int) {}
-func (*cliSink) OnError(_ error)    {}
