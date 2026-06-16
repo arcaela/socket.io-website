@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -444,7 +445,9 @@ func (c *Client) callHTTP(ctx context.Context, method string, params json.RawMes
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	// Advertise both shapes: a server speaking the Streamable HTTP transport
+	// may answer with a single JSON object OR an SSE stream of messages.
+	req.Header.Set("Accept", "application/json, text/event-stream")
 	for k, v := range c.httpHdrs {
 		req.Header.Set(k, v)
 	}
@@ -454,6 +457,16 @@ func (c *Client) callHTTP(ctx context.Context, method string, params json.RawMes
 		return nil, fmt.Errorf("mcp %s http: %w", c.name, err)
 	}
 	defer res.Body.Close()
+
+	// SSE response: parse the event stream and pick out the JSON-RPC message
+	// that answers this request id (ignoring interleaved notifications).
+	if isEventStream(res.Header.Get("Content-Type")) {
+		if res.StatusCode >= 400 {
+			raw, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
+			return nil, fmt.Errorf("mcp %s http %d: %s", c.name, res.StatusCode, truncate(string(raw), 300))
+		}
+		return c.readSSEResponse(res.Body, id)
+	}
 
 	raw, err := io.ReadAll(io.LimitReader(res.Body, 16<<20))
 	if err != nil {
@@ -470,6 +483,60 @@ func (c *Client) callHTTP(ctx context.Context, method string, params json.RawMes
 		return nil, resp.Error
 	}
 	return resp.Result, nil
+}
+
+func isEventStream(contentType string) bool {
+	return strings.Contains(strings.ToLower(contentType), "text/event-stream")
+}
+
+// readSSEResponse scans a `text/event-stream` body and returns the result of
+// the first JSON-RPC response whose id matches `wantID`. Events that aren't a
+// matching response (server notifications, requests, heartbeats) are skipped.
+// Each SSE event is a run of `data:` lines terminated by a blank line; we join
+// them and try to decode a JSON-RPC response.
+func (c *Client) readSSEResponse(body io.Reader, wantID int) (json.RawMessage, error) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4<<20)
+
+	var data []string
+	flush := func() (json.RawMessage, error, bool) {
+		if len(data) == 0 {
+			return nil, nil, false
+		}
+		chunk := strings.Join(data, "\n")
+		data = data[:0]
+		var resp rpcResponse
+		if err := json.Unmarshal([]byte(chunk), &resp); err != nil {
+			return nil, nil, false // not a JSON-RPC response event — skip it
+		}
+		if resp.ID != wantID {
+			return nil, nil, false
+		}
+		if resp.Error != nil {
+			return nil, resp.Error, true
+		}
+		return resp.Result, nil, true
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		switch {
+		case strings.HasPrefix(line, "data:"):
+			data = append(data, strings.TrimSpace(line[len("data:"):]))
+		case line == "":
+			if result, err, ok := flush(); ok {
+				return result, err
+			}
+		}
+	}
+	// Stream may end without a trailing blank line — flush the last event.
+	if result, err, ok := flush(); ok {
+		return result, err
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return nil, fmt.Errorf("mcp %s: SSE stream ended without a response for id %d", c.name, wantID)
 }
 
 func truncate(s string, n int) string {

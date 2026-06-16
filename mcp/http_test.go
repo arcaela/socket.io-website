@@ -220,6 +220,60 @@ func TestHTTPClient_JSONRPCError(t *testing.T) {
 	}
 }
 
+// TestHTTPClient_SSEResponse verifies the HTTP transport handles servers that
+// answer with `text/event-stream` instead of a single JSON object, including
+// skipping interleaved notifications to find the response for our request id.
+func TestHTTPClient_SSEResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var msg map[string]any
+		_ = json.Unmarshal(body, &msg)
+		idRaw, hasID := msg["id"]
+		if !hasID {
+			w.WriteHeader(202)
+			return
+		}
+		method, _ := msg["method"].(string)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		switch method {
+		case "initialize":
+			// An unrelated notification first — must be skipped — then the result.
+			writeSSE(w, map[string]any{"jsonrpc": "2.0", "method": "notifications/message", "params": map[string]any{}})
+			writeSSE(w, map[string]any{"jsonrpc": "2.0", "id": idRaw, "result": map[string]any{
+				"protocolVersion": "2024-11-05", "capabilities": map[string]any{}}})
+		case "tools/call":
+			writeSSE(w, map[string]any{"jsonrpc": "2.0", "id": idRaw, "result": map[string]any{
+				"content": []map[string]any{{"type": "text", "text": "sse-ok"}}}})
+		default:
+			writeSSE(w, map[string]any{"jsonrpc": "2.0", "id": idRaw, "result": map[string]any{}})
+		}
+	}))
+	defer srv.Close()
+
+	c, err := Start(context.Background(), "stub", ServerConfig{URL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	res, err := c.CallTool(context.Background(), "echo", map[string]any{"msg": "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Content) != 1 || res.Content[0].Text != "sse-ok" {
+		t.Fatalf("bad SSE result: %+v", res)
+	}
+}
+
+func writeSSE(w http.ResponseWriter, payload map[string]any) {
+	b, _ := json.Marshal(payload)
+	_, _ = w.Write([]byte("data: " + string(b) + "\n\n"))
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 func TestStart_RequiresCommandOrURL(t *testing.T) {
 	_, err := Start(context.Background(), "x", ServerConfig{})
 	if err == nil || !strings.Contains(err.Error(), "command") {
