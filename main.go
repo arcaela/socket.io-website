@@ -313,6 +313,12 @@ func runChat(ctx context.Context, args []string) error {
 		return err
 	}
 	reg := funcs.BuiltIn()
+	// Wire the image-generation tool only when the provider can actually
+	// produce images (OpenAI, Gemini). Providers that can't simply won't
+	// expose generate_image.
+	if ig, ok := prov.(provider.ImageGenerator); ok {
+		_ = reg.Register(cli.NewImageGenTool(ig))
+	}
 	a := &cli.Agent{
 		Provider:     prov,
 		Tools:        reg,

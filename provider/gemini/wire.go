@@ -119,9 +119,10 @@ type GenerateResponse struct {
 }
 
 type GenerationConfig struct {
-	Temperature *float64 `json:"temperature,omitempty"`
-	TopP        *float64 `json:"topP,omitempty"`
-	MaxTokens   *int     `json:"maxOutputTokens,omitempty"`
+	Temperature        *float64 `json:"temperature,omitempty"`
+	TopP               *float64 `json:"topP,omitempty"`
+	MaxTokens          *int     `json:"maxOutputTokens,omitempty"`
+	ResponseModalities []string `json:"responseModalities,omitempty"`
 }
 
 type generateInner struct {
@@ -369,6 +370,40 @@ func (c *Client) GenerateContent(ctx context.Context, model, projectID, promptID
 		return nil, err
 	}
 	return &gr, nil
+}
+
+// GenerateImage asks an image-capable model (via generateContent with
+// responseModalities) to synthesise an image, returning the inlineData blobs
+// from the response. Non-streaming: image output arrives as a single payload.
+func (c *Client) GenerateImage(ctx context.Context, model, projectID, promptID, prompt string) ([]InlineData, error) {
+	req := generateRequest{
+		Model:        model,
+		Project:      projectID,
+		UserPromptID: promptID,
+		Request: generateInner{
+			Contents:         []Content{{Role: "user", Parts: []Part{{Text: prompt}}}},
+			GenerationConfig: &GenerationConfig{ResponseModalities: []string{"TEXT", "IMAGE"}},
+		},
+	}
+	raw, err := c.doJSON(ctx, "POST", c.methodURL("generateContent"), req)
+	if err != nil {
+		return nil, err
+	}
+	var gr GenerateResponse
+	if err := json.Unmarshal(raw, &gr); err != nil {
+		return nil, fmt.Errorf("decode image response: %w", err)
+	}
+	var blobs []InlineData
+	if gr.Response != nil {
+		for _, cand := range gr.Response.Candidates {
+			for _, part := range cand.Content.Parts {
+				if part.InlineData != nil {
+					blobs = append(blobs, *part.InlineData)
+				}
+			}
+		}
+	}
+	return blobs, nil
 }
 
 // PartCallback receives every part the model emits during streaming. The

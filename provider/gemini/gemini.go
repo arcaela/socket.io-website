@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/arcaela/mini-cli/provider"
@@ -51,6 +52,41 @@ func New(ctx context.Context) (*Provider, error) {
 }
 
 func (p *Provider) Name() string { return "gemini" }
+
+// GenerateImage implements provider.ImageGenerator using an image-capable
+// Gemini model (override with GEMINI_IMAGE_MODEL). Returns a clear error when
+// the account/model produced no image (e.g. the free tier without image
+// output access).
+func (p *Provider) GenerateImage(ctx context.Context, prompt string, _ provider.ImageGenOptions) ([]provider.Image, error) {
+	model := getenv("GEMINI_IMAGE_MODEL", "gemini-2.0-flash-preview-image-generation")
+	blobs, err := p.client.GenerateImage(ctx, model, p.projectID, randomID(), prompt)
+	if err != nil {
+		return nil, err
+	}
+	if len(blobs) == 0 {
+		return nil, fmt.Errorf("gemini: model %q returned no image (image output may be unavailable on this account)", model)
+	}
+	images := make([]provider.Image, 0, len(blobs))
+	for _, b := range blobs {
+		data, err := base64.StdEncoding.DecodeString(b.Data)
+		if err != nil {
+			return nil, fmt.Errorf("decode image data: %w", err)
+		}
+		mime := b.MimeType
+		if mime == "" {
+			mime = "image/png"
+		}
+		images = append(images, provider.Image{MimeType: mime, Data: data})
+	}
+	return images, nil
+}
+
+func getenv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
 
 func (p *Provider) Account(ctx context.Context) (*provider.AccountInfo, error) {
 	return &provider.AccountInfo{

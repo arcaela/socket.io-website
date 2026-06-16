@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,41 @@ import (
 
 	"github.com/arcaela/mini-cli/provider"
 )
+
+func TestGenerateImage_DecodesBase64(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/images/generations") {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		b64 := base64.StdEncoding.EncodeToString([]byte("IMGBYTES"))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"b64_json": b64}},
+		})
+	}))
+	defer srv.Close()
+
+	p := &Provider{APIKey: "k", BaseURL: srv.URL, HTTP: srv.Client()}
+	imgs, err := p.GenerateImage(context.Background(), "a cat", provider.ImageGenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imgs) != 1 || imgs[0].MimeType != "image/png" || string(imgs[0].Data) != "IMGBYTES" {
+		t.Fatalf("bad image: %+v", imgs)
+	}
+}
+
+func TestGenerateImage_SurfacesAPIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(400)
+		_, _ = w.Write([]byte(`{"error":"bad prompt"}`))
+	}))
+	defer srv.Close()
+
+	p := &Provider{APIKey: "k", BaseURL: srv.URL, HTTP: srv.Client()}
+	if _, err := p.GenerateImage(context.Background(), "x", provider.ImageGenOptions{}); err == nil {
+		t.Fatal("expected API error to surface")
+	}
+}
 
 // =============================================================================
 // Message translation

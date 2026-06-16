@@ -266,6 +266,77 @@ func (p *Provider) Generate(ctx context.Context, req provider.GenerateRequest) (
 }
 
 // =============================================================================
+// Image generation (provider.ImageGenerator)
+// =============================================================================
+
+const imagesPath = "/images/generations"
+
+// GenerateImage calls OpenAI's images API and returns the raw PNG bytes. The
+// model is gpt-image-1 by default (override with OPENAI_IMAGE_MODEL); dall-e-3
+// is also supported. Both are returned as base64 and decoded here.
+func (p *Provider) GenerateImage(ctx context.Context, prompt string, opts provider.ImageGenOptions) ([]provider.Image, error) {
+	model := os.Getenv("OPENAI_IMAGE_MODEL")
+	if model == "" {
+		model = "gpt-image-1"
+	}
+	size := opts.Size
+	if size == "" {
+		size = "1024x1024"
+	}
+	n := opts.Count
+	if n <= 0 {
+		n = 1
+	}
+	body := map[string]any{"model": model, "prompt": prompt, "size": size, "n": n}
+	// gpt-image-1 always returns base64 and rejects response_format; dall-e
+	// needs it set explicitly to get base64 instead of a URL.
+	if strings.HasPrefix(model, "dall-e") {
+		body["response_format"] = "b64_json"
+	}
+	payload, _ := json.Marshal(body)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL+imagesPath, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+p.APIKey)
+
+	res, err := p.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 64<<20))
+	if res.StatusCode >= 400 {
+		return nil, fmt.Errorf("openai images %d: %s", res.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var decoded struct {
+		Data []struct {
+			B64JSON string `json:"b64_json"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return nil, fmt.Errorf("decode images response: %w", err)
+	}
+	images := make([]provider.Image, 0, len(decoded.Data))
+	for _, d := range decoded.Data {
+		if d.B64JSON == "" {
+			continue
+		}
+		b, err := base64.StdEncoding.DecodeString(d.B64JSON)
+		if err != nil {
+			return nil, fmt.Errorf("decode image data: %w", err)
+		}
+		images = append(images, provider.Image{MimeType: "image/png", Data: b})
+	}
+	if len(images) == 0 {
+		return nil, fmt.Errorf("openai images: response contained no image data")
+	}
+	return images, nil
+}
+
+// =============================================================================
 // Translation: provider.Message ↔ OpenAI chat messages
 // =============================================================================
 

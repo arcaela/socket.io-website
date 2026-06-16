@@ -123,6 +123,20 @@ type GenerateRequest struct {
 	Tools    []ToolDecl
 }
 
+// ImageGenOptions tunes an image generation request. Zero values mean
+// "provider default".
+type ImageGenOptions struct {
+	Size  string // e.g. "1024x1024"
+	Count int    // how many images to produce (default 1)
+}
+
+// ImageGenerator is an OPTIONAL capability: a provider implements it when it
+// can synthesise images from a text prompt. The CLI registers the
+// `generate_image` tool only for providers that satisfy this interface.
+type ImageGenerator interface {
+	GenerateImage(ctx context.Context, prompt string, opts ImageGenOptions) ([]Image, error)
+}
+
 // Provider is the contract for any LLM backend.
 type Provider interface {
 	// Name is a stable identifier ("gemini", "openai", ...).
